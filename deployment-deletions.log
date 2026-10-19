@@ -1,0 +1,20 @@
+2026-10-19 11:04:41,046 INFO: Loaded 2 deployments; mode=DRY RUN, slots=5
+2026-10-19 11:04:41,046 ERROR: FAILED: Provide --api-token, VCFA_API_TOKEN, or --username
+2026-10-19 11:04:41,046 INFO: SUMMARY successful=0 failures=1 skipped=0 timed_out=0 eligible=0 submitted=0
+2026-10-19 11:06:20,434 INFO: Loaded 2 deployments; mode=DRY RUN, slots=5
+2026-10-19 11:06:20,509 ERROR: FAILED: POST /oauth/tenant/classic/token: connection/TLS failure (URLError); check connectivity and the CA certificate
+2026-10-19 11:06:20,509 INFO: SUMMARY successful=0 failures=1 skipped=0 timed_out=0 eligible=0 submitted=0
+2026-10-19 11:43:56,423 INFO: Loaded 2 deployments; mode=DRY RUN, slots=5
+2026-10-19 11:43:56,479 ERROR: FAILED: POST /oauth/tenant/classic/token: connection/TLS failure (URLError); check connectivity and the CA certificate
+2026-10-19 11:43:56,480 INFO: SUMMARY successful=0 failures=1 skipped=0 timed_out=0 eligible=0 submitted=0
+2026-10-19 11:43:58,042 INFO: Loaded 2 deployments; mode=DRY RUN, slots=5
+2026-10-19 11:43:58,065 ERROR: FAILED: POST /oauth/tenant/classic/token: connection/TLS failure (URLError); check connectivity and the CA certificate
+2026-10-19 11:43:58,066 INFO: SUMMARY successful=0 failures=1 skipped=0 timed_out=0 eligible=0 submitted=0
+2026-10-19 11:43:59,340 INFO: Loaded 2 deployments; mode=DRY RUN, slots=5
+2026-10-19 11:43:59,382 ERROR: FAILED: POST /oauth/tenant/classic/token: connection/TLS failure (URLError); check connectivity and the CA certificate
+2026-10-19 11:43:59,383 INFO: SUMMARY successful=0 failures=1 skipped=0 timed_out=0 eligible=0 submitted=0
+2026-10-19 11:44:11,572 INFO: Loaded 2 deployments; mode=DRY RUN, slots=5
+2026-10-19 11:44:11,583 WARNING: TLS certificate verification is disabled
+2026-10-19 11:44:12,281 WARNING: SKIPPED deployment 3cc625ef-29b0-4869-ba1c-cbf2104b43ba: VM 22560c65-7ed8-4174-82d5-b214599390ac: current state is not Missing
+2026-10-19 11:44:12,487 WARNING: SKIPPED deployment e3989e57-274a-4f98-a64f-16a623dd02dd: VM 32ddb146-6630-4aa5-a658-a592b098d8bb: current state is not Missing
+2026-10-19 11:44:12,487 INFO: SUMMARY successful=0 failures=0 skipped=2 timed_out=0 eligible=0 submitted=0
