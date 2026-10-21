@@ -32,6 +32,15 @@ InModuleScope VmApps.Common {
             param([string]$Id = 'dep-1', [object[]]$Rows = @((New-TestRow)))
             return [pscustomobject]@{ DeploymentId = $Id; Rows = $Rows }
         }
+        function Get-TestInventory {
+            param($Client, [string]$CloudZone, [switch]$All)
+            $path = Join-Path $TestDrive ('inventory-' + [guid]::NewGuid().ToString('N') + '.csv')
+            $writer = Open-VmCsv $path
+            try { $result = Get-VmInventory $Client $CloudZone $writer -All:$All }
+            finally { Close-VmCsv $writer }
+            Add-Member -InputObject $result -NotePropertyName Rows -NotePropertyValue @(Import-Csv $path)
+            return $result
+        }
         function Set-TestReply {
             param([string]$Path, [object[]]$Replies)
             $queue = [Collections.Generic.Queue[object]]::new()
@@ -92,7 +101,7 @@ InModuleScope VmApps.Common {
         It 'exports powerStatus from the fresh recorded powerState independently of syncStatus' {
             $resource = New-TestVm -Properties @{ powerState = 'OFF' }
             Set-TestReply ($script:ResourcePath + '/a') @($resource)
-            $row = (Get-VmInventory $script:Client Production).Rows[0]
+            $row = (Get-TestInventory $script:Client Production).Rows[0]
             $row.powerStatus | Should Be 'OFF'
             $row.status | Should Be 'missing'
             foreach ($value in @($null, '', 12)) {
@@ -141,7 +150,7 @@ InModuleScope VmApps.Common {
             Set-TestResources @((New-TestVm -Status 'SUCCESS'), (New-TestVm b), (New-TestVm c -Status 'SUCCESS'))
             Set-TestReply ($script:ResourcePath + '/a') @((New-TestVm))
             Set-TestReply ($script:ResourcePath + '/b') @((New-TestVm b -Status 'SUCCESS'))
-            $result = Get-VmInventory $script:Client Production
+            $result = Get-TestInventory $script:Client Production
             $result.Rows.Count | Should Be 1
             $result.Rows[0].vm_id | Should Be a
             $result.Rows[0].status | Should Be missing
@@ -149,9 +158,33 @@ InModuleScope VmApps.Common {
             @($script:Calls | Where-Object { $_.Path -like '/iaas/api/machines*' }).Count | Should Be 0
         }
 
+        It 'logs an unreadable deployment resource list and continues with an incomplete result' {
+            $message = "$script:ResourcePath`: HTTP 403"
+            Set-TestReply $script:ResourcePath @([VmApiException]::new('GET', $script:ResourcePath, 403))
+            $result = Get-TestInventory $script:Client Production
+            $result.Rows.Count | Should Be 0
+            $result.Unverified | Should Be 0
+            $result.IncompleteDeployments | Should Be 1
+            Assert-MockCalled Write-VmLog -Times 1 -Exactly -ParameterFilter {
+                $Level -eq 'ERROR' -and $Message -like "*$message*"
+            }
+        }
+
+        It 'logs malformed VM detail responses and excludes those VMs without aborting inventory' {
+            Set-TestResources @((New-TestVm))
+            Set-TestReply ($script:ResourcePath + '/a') @(
+                [VmInventoryException]::new("$script:ResourcePath/a`: invalid JSON response"))
+            $result = Get-TestInventory $script:Client Production
+            $result.Rows.Count | Should Be 0
+            $result.Unverified | Should Be 1
+            Assert-MockCalled Write-VmLog -Times 1 -Exactly -ParameterFilter {
+                $Level -eq 'ERROR' -and $Message -like '*invalid JSON response*'
+            }
+        }
+
         It 'exports all synchronization statuses without discovered VMs' {
             Set-TestResources @((New-TestVm), (New-TestVm b -Status SUCCESS), (New-TestVm c -Status ''))
-            $result = Get-VmInventory $script:Client Production -All
+            $result = Get-TestInventory $script:Client Production -All
             ($result.Rows.status -join ',') | Should Be 'missing,SUCCESS,unknown'
             $script:Calls.Count | Should Be 9
         }
@@ -159,7 +192,7 @@ InModuleScope VmApps.Common {
         It 'checks every compute reference and caches placement only within a run' {
             Set-TestResources @((New-TestVm), (New-TestVm b -Properties @{ endpointId = 'other' }),
                 (New-TestVm c -Properties @{ datacenter = 'other' }), (New-TestVm d -Properties @{ computeHostRef = 'ResourcePool:other' }))
-            $result = Get-VmInventory $script:Client Production
+            $result = Get-TestInventory $script:Client Production
             $result.Rows.Count | Should Be 1
             $result.Rows[0].vm_id | Should Be a
             @($script:Calls | Where-Object { $_.Path -like '*/computes' }).Count | Should Be 1
@@ -177,7 +210,7 @@ InModuleScope VmApps.Common {
                 Set-TestReply '/iaas/api/regions/region-1' @(@{
                     name = 'vcf-lab-dc-01'; externalRegionId = 'dc-1'; cloudAccountId = 'account-1'
                 })
-                $result = Get-VmInventory $script:Client Production
+                $result = Get-TestInventory $script:Client Production
                 $result.Unverified | Should Be 0
                 if ($overrides.Count) { $result.Rows.Count | Should Be 0 }
                 else { $result.Rows.Count | Should Be 1 }
@@ -199,7 +232,7 @@ InModuleScope VmApps.Common {
                 Set-TestReply '/iaas/api/regions/region-1' @(@{
                     name = 'vcf-lab-dc-01'; externalRegionId = 'dc-1'; cloudAccountId = 'account-1'
                 })
-                $result = Get-VmInventory $script:Client Production
+                $result = Get-TestInventory $script:Client Production
                 $result.Unverified | Should Be 1
                 $result.Rows.Count | Should Be 0
             }
@@ -215,7 +248,7 @@ InModuleScope VmApps.Common {
                 if ($conflict -eq 'vcUuid') { $compute.customProperties.vcUuid = 'other' }
                 else { $compute.externalRegionId = 'other' }
                 Set-TestReply '/iaas/api/zones/zone-1/computes' @(@{ content = @($compute); totalElements = 1 })
-                { Get-VmInventory $script:Client Production } | Should Throw
+                { Get-TestInventory $script:Client Production } | Should Throw
             }
         }
 
@@ -231,12 +264,12 @@ InModuleScope VmApps.Common {
 
         It 'marks unverified membership and resource 404 as incomplete, not Missing' {
             Set-TestResources @((New-TestVm -Properties @{ computeHostRef = ''; zone = '' }))
-            $result = Get-VmInventory $script:Client Production
+            $result = Get-TestInventory $script:Client Production
             $result.Rows.Count | Should Be 0
             $result.Unverified | Should Be 1
             Set-TestResources
             Set-TestReply ($script:ResourcePath + '/a') @([VmApiException]::new('GET', 'resource', 404))
-            $result = Get-VmInventory $script:Client Production
+            $result = Get-TestInventory $script:Client Production
             $result.Unverified | Should Be 1
             $result.Rows.Count | Should Be 0
         }
@@ -244,14 +277,14 @@ InModuleScope VmApps.Common {
         It 'fetches only the individual machine when its real name is missing' {
             Set-TestResources @((New-TestVm -Properties @{ resourceName = '' }))
             Set-TestReply '/iaas/api/machines/a' @(@{ id = 'a'; name = 'actual-vm' })
-            (Get-VmInventory $script:Client Production).Rows[0].vm_name | Should Be 'actual-vm'
+            (Get-TestInventory $script:Client Production).Rows[0].vm_name | Should Be 'actual-vm'
         }
 
         It 'rejects changed resource identities and duplicate VM associations' {
             Set-TestReply ($script:ResourcePath + '/a') @((New-TestVm other))
-            { Get-VmInventory $script:Client Production } | Should Throw 'identity/type changed'
+            { Get-TestInventory $script:Client Production } | Should Throw 'identity/type changed'
             Set-TestResources @((New-TestVm), (New-TestVm b -Properties @{ resourceId = 'a' }))
-            { Get-VmInventory $script:Client Production } | Should Throw 'multiple deployment resources'
+            { Get-TestInventory $script:Client Production } | Should Throw 'multiple deployment resources'
         }
 
         It 'writes BOM CSV with stable columns, quotes and Unicode and reads it back' {
@@ -488,6 +521,41 @@ InModuleScope VmApps.Common {
                 $Headers['Content-Type'] -eq 'application/x-www-form-urlencoded'
             }
         }
+        It 'refreshes a bearer token after fifteen minutes for each supported auth flow' {
+            $script:RefreshCalls = [Collections.Generic.List[object]]::new()
+            Mock Invoke-VmRequest {
+                param($Client, $Method, $Path, $Query, $Body, $Headers, $NoBearerToken, $SkipTokenRefresh)
+                $script:RefreshCalls.Add([pscustomobject]@{
+                    Path = $Path; Body = $Body; Headers = $Headers
+                    NoBearerToken = [bool]$NoBearerToken; SkipTokenRefresh = [bool]$SkipTokenRefresh
+                })
+                if ($Path -eq '/cloudapi/1.0.0/sessions') {
+                    return @{
+                        Body = ''; Headers = @{ 'x-vmware-vcloud-access-token' = 'fresh-session' }
+                    }
+                }
+                if ($Path -eq '/iaas/api/login') { return @{ Body = '{"token":"fresh-legacy"}'; Headers = @{} } }
+                return @{ Body = '{"access_token":"fresh-oauth"}'; Headers = @{} }
+            }
+            foreach ($mode in @('oauth', 'legacy', 'session')) {
+                $client = [pscustomobject]@{
+                    Token = 'old-token'; TokenIssuedAt = [DateTime]::UtcNow.AddMinutes(-16)
+                    RefreshMode = $mode; RefreshToken = 'refresh-token'
+                    RefreshPath = '/oauth/tenant/my%20org/token'; SessionAuthorization = 'Basic credentials'
+                    CloudApiVersion = '40.0'; ApiVersion = '2021-07-15'; Base = 'https://example.invalid'
+                    Timeout = 5; Insecure = $false
+                }
+                Update-VmAccessTokenIfNeeded $client
+                if ($mode -eq 'oauth') { $client.Token | Should Be 'fresh-oauth' }
+                elseif ($mode -eq 'legacy') { $client.Token | Should Be 'fresh-legacy' }
+                else { $client.Token | Should Be 'fresh-session' }
+                $client.TokenIssuedAt | Should BeGreaterThan ([DateTime]::UtcNow.AddMinutes(-1))
+                $lastCall = $script:RefreshCalls[$script:RefreshCalls.Count - 1]
+                $lastCall.NoBearerToken | Should Be $true
+                $lastCall.SkipTokenRefresh | Should Be $true
+            }
+            ($script:RefreshCalls.Path -join ',') | Should Be '/oauth/tenant/my%20org/token,/iaas/api/login,/cloudapi/1.0.0/sessions'
+        }
         It 'uses organization-qualified Basic session authentication' {
             $script:Options.Insecure = $true
             $script:Options.ApiToken = ''
@@ -644,12 +712,14 @@ InModuleScope VmApps.Common {
         Context 'legacy inventory' {
             It 'authenticates before inventory and writes the same Missing-only CSV' {
                 Mock Get-VmInventory {
-                    param($Client, $CloudZone, $All)
+                    param($Client, $CloudZone, $CsvWriter, $All)
                     if ($Client.Token -cne 'legacy-access' -or $All) { throw 'Incorrect authentication or filter' }
-                    return [pscustomobject]@{ Rows = @([pscustomobject]@{
+                    $row = [pscustomobject]@{
                         vm_name = 'vm'; deployment_name = 'App'; status = 'missing'; vm_id = 'a'
                         resource_id = 'a'; deployment_id = 'dep'; cloudzone = $CloudZone; cloudzone_id = 'zone'
-                    }); Unverified = 0 }
+                    }
+                    Write-VmCsvRow $CsvWriter $row
+                    return [pscustomobject]@{ Count = 1; Unverified = 0; IncompleteDeployments = 0 }
                 }
                 $path = Join-Path $TestDrive 'legacy-inventory.csv'
                 (Invoke-VmInventoryCommand $script:LegacyOptions Production $path) | Should Be 0
@@ -702,10 +772,11 @@ InModuleScope VmApps.Common {
         Context 'inventory scope' {
             It 'keeps one callback through the command and restores it on success and errors' {
                 Mock Get-VmInventory {
+                    param($Client, $CloudZone, $CsvWriter)
                     if (-not [object]::ReferenceEquals($script:ActiveCallback,
                         [Net.ServicePointManager]::ServerCertificateValidationCallback)) { throw 'Callback changed mid-command' }
                     if ($script:TlsStage -eq 'processing') { throw 'Inventory failed' }
-                    return [pscustomobject]@{ Rows = @(); Unverified = 0 }
+                    return [pscustomobject]@{ Count = 0; Unverified = 0; IncompleteDeployments = 0 }
                 }
                 $original = [Net.ServicePointManager]::ServerCertificateValidationCallback
                 try {
@@ -760,16 +831,41 @@ InModuleScope VmApps.Common {
 InModuleScope VmApps.Common {
     Describe 'Native request failure cleanup' {
         It 'restores a preexisting callback after a connection failure without leaking exception details' {
-            Mock Invoke-WebRequest { throw [Net.WebException]::new('sensitive-connection-details') }
+            $originalProgressPreference = $ProgressPreference
+            $script:RequestProgressPreference = $null
+            Mock Invoke-WebRequest {
+                $script:RequestProgressPreference = $ProgressPreference
+                throw [Net.WebException]::new('sensitive-connection-details')
+            }
             $original = [Net.ServicePointManager]::ServerCertificateValidationCallback
             try {
+                $ProgressPreference = 'Continue'
                 [Net.ServicePointManager]::ServerCertificateValidationCallback = { $false }
                 $prior = [Net.ServicePointManager]::ServerCertificateValidationCallback
                 $client = [pscustomobject]@{ Base = 'https://example.invalid'; ApiVersion = ''; Token = ''; Timeout = 5 }
                 { Invoke-VmRequest $client GET '/test' } | Should Throw 'GET /test: connection/TLS failure'
+                $script:RequestProgressPreference | Should Be 'SilentlyContinue'
+                $ProgressPreference | Should Be 'Continue'
                 [object]::ReferenceEquals($prior,
                     [Net.ServicePointManager]::ServerCertificateValidationCallback) | Should Be $true
-            } finally { [Net.ServicePointManager]::ServerCertificateValidationCallback = $original }
+            } finally {
+                $ProgressPreference = $originalProgressPreference
+                [Net.ServicePointManager]::ServerCertificateValidationCallback = $original
+            }
+        }
+
+        It 'logs API call timing only in debug mode and never logs credential query values' {
+            $script:Logged = @()
+            Mock Write-VmLog { $script:Logged += "${Level}: $Message" }
+            Mock Invoke-WebRequest { throw [Net.WebException]::new('down') }
+            $client = [pscustomobject]@{ Base = 'https://example.invalid'; ApiVersion = ''; Token = ''; Timeout = 5; Debug = $false }
+            { Invoke-VmRequest $client GET '/quiet' } | Should Throw
+            $script:Logged.Count | Should Be 0
+            $client.Debug = $true
+            { Invoke-VmRequest $client POST '/login' -Query @{ access_token = 'secret'; page = 2 } } | Should Throw
+            $script:Logged.Count | Should Be 1
+            $script:Logged[0] | Should Match '^DEBUG: POST /login\?page=2 -> connection/TLS failure in [\d,]+ ms$'
+            $script:Logged[0] | Should Not Match 'secret'
         }
     }
 }
@@ -902,17 +998,35 @@ InModuleScope VmApps.Common {
         Context 'inventory CLI' {
             It 'writes Missing-only inventory by default and honors All' {
                 Mock Get-VmInventory {
-                    param($Client, $CloudZone, $All)
+                    param($Client, $CloudZone, $CsvWriter, $All)
                     $rows = @([pscustomobject]@{ vm_name = 'vm'; deployment_name = 'App'; status = 'missing'
                         vm_id = 'a'; resource_id = 'a'; deployment_id = 'dep'; cloudzone = 'Production'; cloudzone_id = 'zone' })
                     if ($All) { $rows += $rows[0].PSObject.Copy(); $rows[1].status = 'SUCCESS' }
-                    return [pscustomobject]@{ Rows = $rows; Unverified = 0 }
+                    foreach ($row in $rows) { Write-VmCsvRow $CsvWriter $row }
+                    return [pscustomobject]@{ Count = $rows.Count; Unverified = 0; IncompleteDeployments = 0 }
                 }
                 $path = Join-Path $TestDrive 'inventory.csv'
                 (Invoke-VmInventoryCommand @{} Production $path) | Should Be 0
                 @(Import-Csv $path).Count | Should Be 1
                 (Invoke-VmInventoryCommand @{} Production $path -All) | Should Be 0
                 @(Import-Csv $path).Count | Should Be 2
+            }
+
+            It 'preserves rows already written when a later inventory error occurs' {
+                Mock Get-VmInventory {
+                    param($Client, $CloudZone, $CsvWriter)
+                    Write-VmCsvRow $CsvWriter ([pscustomobject]@{
+                        vm_name = 'vm'; deployment_name = 'App'; status = 'missing'
+                        vm_id = 'a'; resource_id = 'a'; deployment_id = 'dep'
+                        cloudzone = $CloudZone; cloudzone_id = 'zone'; powerStatus = 'ON'
+                    })
+                    throw [VmInventoryException]::new('later deployment failed')
+                }
+                $path = Join-Path $TestDrive 'partial-inventory.csv'
+                (Invoke-VmInventoryCommand @{} Production $path) | Should Be 1
+                $rows = @(Import-Csv $path)
+                $rows.Count | Should Be 1
+                $rows[0].vm_id | Should Be a
             }
         }
         Context 'deletion CLI' {

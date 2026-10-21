@@ -148,12 +148,55 @@ function Stop-VmTlsScope {
     }
 }
 
+function Update-VmAccessTokenIfNeeded {
+    param($Client)
+    $refreshMode = Get-VmValue $Client RefreshMode
+    $issuedAt = Get-VmValue $Client TokenIssuedAt
+    if (-not $refreshMode -or $null -eq $issuedAt -or
+        ([DateTime]::UtcNow - [DateTime]$issuedAt).TotalMinutes -lt 15) {
+        return
+    }
+
+    switch ($refreshMode) {
+        'oauth' {
+            $body = 'grant_type=refresh_token&refresh_token=' + (ConvertTo-VmIdentifier $Client.RefreshToken)
+            $reply = Invoke-VmRequest $Client POST $Client.RefreshPath -Body $body `
+                -Headers @{ 'Content-Type' = 'application/x-www-form-urlencoded' } `
+                -NoBearerToken -SkipTokenRefresh
+            $Client.Token = Get-VmRequiredText (ConvertFrom-VmJson $reply.Body 'token refresh') access_token 'token refresh'
+        }
+        'legacy' {
+            $reply = Invoke-VmRequest $Client POST '/iaas/api/login' `
+                -Body (ConvertTo-Json -Compress -InputObject @{ refreshToken = $Client.RefreshToken }) `
+                -Headers @{ 'Content-Type' = 'application/json' } -NoBearerToken -SkipTokenRefresh
+            $Client.Token = Get-VmRequiredText (ConvertFrom-VmJson $reply.Body 'legacy token refresh') token 'legacy token refresh'
+        }
+        'session' {
+            $reply = Invoke-VmRequest $Client POST '/cloudapi/1.0.0/sessions' -Body '' `
+                -Headers @{
+                    Authorization = $Client.SessionAuthorization
+                    Accept = 'application/json;version=' + $Client.CloudApiVersion
+                } -NoBearerToken -SkipTokenRefresh
+            if (-not $reply.Headers.ContainsKey('x-vmware-vcloud-access-token')) {
+                throw [VmInventoryException]::new('Session refresh omitted X-VMWARE-VCLOUD-ACCESS-TOKEN')
+            }
+            $Client.Token = $reply.Headers['x-vmware-vcloud-access-token']
+            if (-not $Client.Token) { throw [VmInventoryException]::new('Empty session access token after refresh') }
+        }
+        default { throw [VmInventoryException]::new('Unsupported bearer token refresh mode') }
+    }
+    $Client.TokenIssuedAt = [DateTime]::UtcNow
+    Write-VmLog 'Refreshed bearer token before request'
+}
+
 function Invoke-VmRequest {
     param($Client, [string]$Method, [string]$Path, [hashtable]$Query = @{},
-          [AllowNull()][string]$Body, [hashtable]$Headers = @{})
+          [AllowNull()][string]$Body, [hashtable]$Headers = @{},
+          [switch]$NoBearerToken, [switch]$SkipTokenRefresh)
     if (-not $Path.StartsWith('/') -or $Path.StartsWith('//')) {
         throw [VmInventoryException]::new('API paths must be relative to the configured host')
     }
+    if (-not $SkipTokenRefresh) { Update-VmAccessTokenIfNeeded $Client }
     $parameters = @{} + $Query
     if ($Path.StartsWith('/iaas/')) { $parameters.apiVersion = $Client.ApiVersion }
     $url = $Client.Base + $Path
@@ -165,7 +208,7 @@ function Invoke-VmRequest {
     }
     $requestHeaders = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::OrdinalIgnoreCase)
     $requestHeaders['Accept'] = 'application/json'
-    if ($Client.Token) { $requestHeaders['Authorization'] = 'Bearer ' + $Client.Token }
+    if (-not $NoBearerToken -and $Client.Token) { $requestHeaders['Authorization'] = 'Bearer ' + $Client.Token }
     foreach ($key in $Headers.Keys) { $requestHeaders[$key] = $Headers[$key] }
     $request = @{
         Uri = $url; Method = $Method; Headers = $requestHeaders
@@ -177,20 +220,41 @@ function Invoke-VmRequest {
         $request.SkipCertificateCheck = $true
     }
     $response = @()
+    $previousProgressPreference = $ProgressPreference
+    $debug = [bool](Get-VmValue $Client Debug)
+    $outcome = 'failed'
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     try {
+        $ProgressPreference = 'SilentlyContinue'
         # 5.1 can emit the redirect response before raising MaximumRedirectExceeded.
         $null = Invoke-WebRequest @request -OutVariable response
+        $outcome = [string][int]$response[0].StatusCode
     }
     catch {
         if ($response.Count -gt 0) {
+            $outcome = [string][int]$response[0].StatusCode
             throw [VmApiException]::new($Method, $Path, [int]$response[0].StatusCode)
         }
         $webResponse = $null
         if ($_.Exception.PSObject.Properties['Response']) { $webResponse = $_.Exception.Response }
         if ($null -ne $webResponse) {
+            $outcome = [string][int]$webResponse.StatusCode
             throw [VmApiException]::new($Method, $Path, [int]$webResponse.StatusCode)
         }
+        $outcome = 'connection/TLS failure'
         throw [VmInventoryException]::new("${Method} ${Path}: connection/TLS failure")
+    }
+    finally {
+        $stopwatch.Stop()
+        $ProgressPreference = $previousProgressPreference
+        if ($debug) {
+            # Query values may carry credentials, so only non-secret paging parameters are shown.
+            $shown = @($Query.Keys | Where-Object { $_ -in @('page', 'size', '$top', '$skip') } | Sort-Object |
+                ForEach-Object { '{0}={1}' -f $_, $Query[$_] })
+            $target = $Path
+            if ($shown.Count) { $target += '?' + ($shown -join '&') }
+            Write-VmLog ('{0} {1} -> {2} in {3:N0} ms' -f $Method, $target, $outcome, $stopwatch.Elapsed.TotalMilliseconds) DEBUG
+        }
     }
     $response = $response[0]
     if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) {
@@ -290,7 +354,9 @@ function New-VmClient {
         Base = $uri.GetLeftPart([UriPartial]::Authority)
         Timeout = $Options.Timeout; PageSize = $Options.PageSize
         ApiVersion = $Options.ApiVersion; CloudApiVersion = $Options.CloudApiVersion
-        Token = ''; Insecure = [bool]$Options['Insecure']
+        Token = ''; TokenIssuedAt = $null; RefreshMode = ''; RefreshToken = ''
+        RefreshPath = ''; SessionAuthorization = ''; Insecure = [bool]$Options['Insecure']
+        Debug = [bool]$Options['Debug']
     }
     if ($legacy) {
         $refreshToken = $Options.ApiToken
@@ -307,16 +373,23 @@ function New-VmClient {
                 -Headers @{ 'Content-Type' = 'application/json' }
             $refreshToken = Get-VmRequiredText (ConvertFrom-VmJson $reply.Body 'legacy login') refresh_token 'legacy login'
         }
+        $client.RefreshMode = 'legacy'
+        $client.RefreshToken = $refreshToken
         $reply = Invoke-VmRequest $client POST '/iaas/api/login' `
             -Body (ConvertTo-Json -Compress -InputObject @{ refreshToken = $refreshToken }) `
             -Headers @{ 'Content-Type' = 'application/json' }
         $client.Token = Get-VmRequiredText (ConvertFrom-VmJson $reply.Body 'legacy token exchange') token 'legacy token exchange'
+        $client.TokenIssuedAt = [DateTime]::UtcNow
     } elseif ($Options.ApiToken) {
         if (-not $Options.Org) { throw [VmInventoryException]::new('Org is required for an organization API token') }
+        $client.RefreshMode = 'oauth'
+        $client.RefreshToken = $Options.ApiToken
+        $client.RefreshPath = '/oauth/tenant/{0}/token' -f (ConvertTo-VmIdentifier $Options.Org)
         $body = 'grant_type=refresh_token&refresh_token=' + (ConvertTo-VmIdentifier $Options.ApiToken)
-        $reply = Invoke-VmRequest $client POST ('/oauth/tenant/{0}/token' -f (ConvertTo-VmIdentifier $Options.Org)) `
+        $reply = Invoke-VmRequest $client POST $client.RefreshPath `
             -Body $body -Headers @{ 'Content-Type' = 'application/x-www-form-urlencoded' }
         $client.Token = Get-VmRequiredText (ConvertFrom-VmJson $reply.Body 'token exchange') access_token 'token exchange'
+        $client.TokenIssuedAt = [DateTime]::UtcNow
     } else {
         $principal = [string]$Options.Username
         if ($Options.Org -and -not $principal.EndsWith('@' + $Options.Org, [StringComparison]::Ordinal)) {
@@ -331,14 +404,17 @@ function New-VmClient {
             $password = [Net.NetworkCredential]::new('', $secure).Password
         }
         $basic = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${principal}:$password"))
+        $client.RefreshMode = 'session'
+        $client.SessionAuthorization = "Basic $basic"
         $reply = Invoke-VmRequest $client POST '/cloudapi/1.0.0/sessions' -Body '' -Headers @{
-            Authorization = "Basic $basic"; Accept = 'application/json;version=' + $client.CloudApiVersion
+            Authorization = $client.SessionAuthorization; Accept = 'application/json;version=' + $client.CloudApiVersion
         }
         if (-not $reply.Headers.ContainsKey('x-vmware-vcloud-access-token')) {
             throw [VmInventoryException]::new('Session response omitted X-VMWARE-VCLOUD-ACCESS-TOKEN')
         }
         $client.Token = $reply.Headers['x-vmware-vcloud-access-token']
         if (-not $client.Token) { throw [VmInventoryException]::new('Empty session access token') }
+        $client.TokenIssuedAt = [DateTime]::UtcNow
     }
     return $client
 }
@@ -467,7 +543,7 @@ function Get-VmComputeMembership {
 }
 
 function Get-VmInventory {
-    param($Client, [string]$CloudZone, [switch]$All)
+    param($Client, [string]$CloudZone, [Parameter(Mandatory)][IO.StreamWriter]$CsvWriter, [switch]$All)
     $zones = @(Get-VmRecords $Client '/iaas/api/zones' | Where-Object { (Get-VmText $_ name) -ceq $CloudZone })
     if ($zones.Count -ne 1) {
         throw [VmInventoryException]::new("Expected one visible cloud zone named '$CloudZone'; found $($zones.Count)")
@@ -477,21 +553,35 @@ function Get-VmInventory {
     if ((Get-VmText $zone id) -cne $zoneId -or (Get-VmText $zone name) -cne $CloudZone) {
         throw [VmInventoryException]::new('Cloud zone changed during lookup; rerun')
     }
-    $rows = [Collections.Generic.List[object]]::new()
+    $rowCount = 0
     $unverified = 0
+    $incompleteDeployments = 0
     $seen = New-VmSet
     $cache = New-VmPlacementCache
     foreach ($deployment in (Get-VmRecords $Client '/deployment/api/deployments')) {
         $depId = Get-VmRequiredText $deployment id deployment
         $depName = Get-VmRequiredText $deployment name "Deployment $depId"
         $path = '/deployment/api/deployments/{0}/resources' -f (ConvertTo-VmIdentifier $depId)
-        foreach ($candidate in (Get-VmRecords $Client $path)) {
+        try { $candidates = @(Get-VmRecords $Client $path) }
+        catch [System.Management.Automation.PipelineStoppedException] { throw }
+        catch {
+            $failure = Get-VmFailure $_.Exception
+            Write-VmLog "Deployment $depId resources could not be read: $($failure.Message)" ERROR
+            $incompleteDeployments++
+            continue
+        }
+        foreach ($candidate in $candidates) {
             if (-not (Test-VmResource $candidate)) { continue }
             $resourceId = Get-VmRequiredText $candidate id 'deployment resource'
             try { $resource = Get-VmRecord $Client ("{0}/{1}" -f $path, (ConvertTo-VmIdentifier $resourceId)) }
+            catch [System.Management.Automation.PipelineStoppedException] { throw }
             catch {
-                if (-not (Test-VmApiStatus $_.Exception 404)) { throw }
-                Write-VmLog "VM resource $resourceId disappeared; membership unverified" WARNING
+                $failure = Get-VmFailure $_.Exception
+                if (Test-VmApiStatus $failure 404) {
+                    Write-VmLog "VM resource $resourceId disappeared; membership unverified" WARNING
+                } else {
+                    Write-VmLog "VM resource $resourceId could not be verified: $($failure.Message)" ERROR
+                }
                 $unverified++; continue
             }
             if ((Get-VmText $resource id) -cne $resourceId -or
@@ -521,9 +611,14 @@ function Get-VmInventory {
             if (-not $name) {
                 # The top-level resource name is a blueprint label, not the VM name.
                 try { $machine = Get-VmRecord $Client ("/iaas/api/machines/{0}" -f (ConvertTo-VmIdentifier $machineId)) }
+                catch [System.Management.Automation.PipelineStoppedException] { throw }
                 catch {
-                    if (-not (Test-VmApiStatus $_.Exception 404)) { throw }
-                    Write-VmLog "VM resource $resourceId has no recorded VM name; excluded" WARNING
+                    $failure = Get-VmFailure $_.Exception
+                    if (Test-VmApiStatus $failure 404) {
+                        Write-VmLog "VM resource $resourceId has no recorded VM name; excluded" WARNING
+                    } else {
+                        Write-VmLog "VM $machineId name could not be read: $($failure.Message)" ERROR
+                    }
                     $unverified++; continue
                 }
                 if ((Get-VmText $machine id) -cne $machineId) {
@@ -531,21 +626,19 @@ function Get-VmInventory {
                 }
                 $name = Get-VmRequiredText $machine name "VM $machineId"
             }
-            $rows.Add([pscustomobject][ordered]@{
+            $row = [pscustomobject][ordered]@{
                 vm_name = $name; deployment_name = $depName; status = $status
                 vm_id = $machineId; resource_id = $resourceId; deployment_id = $depId
                 cloudzone = $CloudZone; cloudzone_id = $zoneId
                 powerStatus = Get-VmPowerStatus $resource
-            })
+            }
+            Write-VmCsvRow $CsvWriter $row
+            $rowCount++
         }
     }
-    $rows.Sort([Comparison[object]]{
-        param($a, $b)
-        $order = [StringComparer]::OrdinalIgnoreCase.Compare($a.vm_name, $b.vm_name)
-        if ($order -eq 0) { $order = [StringComparer]::OrdinalIgnoreCase.Compare($a.deployment_name, $b.deployment_name) }
-        return $order
-    })
-    return [pscustomobject]@{ Rows = $rows.ToArray(); Unverified = $unverified }
+    return [pscustomobject]@{
+        Count = $rowCount; Unverified = $unverified; IncompleteDeployments = $incompleteDeployments
+    }
 }
 
 function ConvertTo-VmCsvLine {
@@ -553,27 +646,31 @@ function ConvertTo-VmCsvLine {
     return (($Values | ForEach-Object { '"' + ([string]$_).Replace('"', '""') + '"' }) -join ',')
 }
 
+function Open-VmCsv {
+    param([string]$Path)
+    $writer = [IO.StreamWriter]::new((Resolve-VmPath $Path), $false, [Text.UTF8Encoding]::new($true))
+    $writer.AutoFlush = $true
+    $writer.WriteLine((ConvertTo-VmCsvLine $script:VmColumns))
+    return $writer
+}
+
+function Write-VmCsvRow {
+    param([IO.StreamWriter]$Writer, $Row)
+    $values = foreach ($column in $script:VmColumns) { Get-VmText $Row $column }
+    $Writer.WriteLine((ConvertTo-VmCsvLine $values))
+}
+
+function Close-VmCsv {
+    param([AllowNull()][IO.StreamWriter]$Writer)
+    if ($null -ne $Writer) { $Writer.Dispose() }
+}
+
 function Write-VmCsv {
     param([string]$Path, [object[]]$Rows)
-    $fullPath = Resolve-VmPath $Path
-    $temporary = [IO.Path]::Combine([IO.Path]::GetDirectoryName($fullPath), '.' + [IO.Path]::GetRandomFileName())
+    $writer = Open-VmCsv $Path
     try {
-        $writer = [IO.StreamWriter]::new($temporary, $false, [Text.UTF8Encoding]::new($true))
-        try {
-            $writer.WriteLine((ConvertTo-VmCsvLine $script:VmColumns))
-            foreach ($row in $Rows) {
-                $values = foreach ($column in $script:VmColumns) { Get-VmText $row $column }
-                $writer.WriteLine((ConvertTo-VmCsvLine $values))
-            }
-        } finally { $writer.Dispose() }
-        if ([IO.File]::Exists($fullPath)) {
-            $backup = [IO.Path]::Combine([IO.Path]::GetDirectoryName($fullPath), '.' + [IO.Path]::GetRandomFileName())
-            try { [IO.File]::Replace($temporary, $fullPath, $backup) }
-            finally { if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) } }
-        } else { [IO.File]::Move($temporary, $fullPath) }
-    } finally {
-        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
-    }
+        foreach ($row in $Rows) { Write-VmCsvRow $writer $row }
+    } finally { Close-VmCsv $writer }
 }
 
 function Read-VmTargets {
@@ -766,7 +863,18 @@ function Get-VmDeletionOutcome {
 }
 
 function New-VmStatistics {
-    return [pscustomobject]@{ Successful = 0; Failures = 0; Skipped = 0; TimedOut = 0; Eligible = 0; Submitted = 0 }
+    return [pscustomobject]@{
+        Successful = 0; Failures = 0; Skipped = 0; TimedOut = 0
+        Eligible = 0; Submitted = 0; Processed = 0
+    }
+}
+
+function Update-VmProcessedProgress {
+    param($Statistics, $Target, [int]$Total)
+    $Statistics.Processed += @($Target.Rows).Count
+    Write-Progress -Activity 'Processing VMs' `
+        -Status ("{0}/{1} VMs processed" -f $Statistics.Processed, $Total) `
+        -PercentComplete ([int](100 * $Statistics.Processed / $Total))
 }
 
 function Get-VmMonotonicTime {
@@ -788,9 +896,14 @@ function Invoke-VmDeletionQueue {
         }
     }
     $queue = [Collections.Generic.Queue[object]]::new()
-    foreach ($target in $Targets) { $queue.Enqueue($target) }
+    $totalVms = 0
+    foreach ($target in $Targets) {
+        $queue.Enqueue($target)
+        $totalVms += @($target.Rows).Count
+    }
     $board = [Collections.Generic.List[object]]::new()
     $requestIds = New-VmSet
+    try {
     while ($queue.Count -or $board.Count) {
         while ($queue.Count -and $board.Count -lt $Parallel) {
             $target = $queue.Dequeue()
@@ -805,11 +918,13 @@ function Invoke-VmDeletionQueue {
                     $Statistics.Failures++
                     Write-VmLog "FAILED verification for deployment $($target.DeploymentId): $($failure.Message)" ERROR
                 }
+                Update-VmProcessedProgress $Statistics $target $totalVms
                 continue
             }
             $Statistics.Eligible++
             if (-not $Execute) {
                 Write-VmLog "DRY RUN: deployment $($target.DeploymentId) ($($target.Rows[0].deployment_name)) would be deleted; no delete submitted"
+                Update-VmProcessedProgress $Statistics $target $totalVms
                 continue
             }
             $started = Get-VmMonotonicTime
@@ -820,6 +935,7 @@ function Invoke-VmDeletionQueue {
                 $Statistics.Failures++
                 Write-VmLog ("FAILED submission for deployment {0}: {1}. Outcome may be uncertain; check the server before retrying. No automatic resubmission." -f
                     $target.DeploymentId, (Get-VmFailure $_.Exception).Message) ERROR
+                Update-VmProcessedProgress $Statistics $target $totalVms
                 continue
             }
             $Statistics.Submitted++
@@ -833,6 +949,7 @@ function Invoke-VmDeletionQueue {
                 $Statistics.Failures++; $Statistics.TimedOut++
                 Write-VmLog "TIMED OUT deployment $($outstanding.Target.DeploymentId) request $($outstanding.RequestId) after ${elapsed}s; removed from chalkboard. Server operation is NOT cancelled and may still complete." ERROR
                 [void]$board.Remove($outstanding)
+                Update-VmProcessedProgress $Statistics $outstanding.Target $totalVms
                 continue
             }
             try { $outcome = Get-VmDeletionOutcome $Client $outstanding }
@@ -850,6 +967,7 @@ function Invoke-VmDeletionQueue {
                     $Statistics.Failures++
                     Write-VmLog "FAILED deletion deployment $($outstanding.Target.DeploymentId) request $($outstanding.RequestId)" ERROR
                 }
+                Update-VmProcessedProgress $Statistics $outstanding.Target $totalVms
             }
         }
         if ($board.Count -and -not ($queue.Count -and $board.Count -lt $Parallel)) {
@@ -858,20 +976,27 @@ function Invoke-VmDeletionQueue {
             Wait-VmPoll ([Math]::Max(0, [Math]::Min($PollInterval, $remaining)))
         }
     }
+    } finally {
+        if ($totalVms -gt 0) { Write-Progress -Activity 'Processing VMs' -Completed }
+    }
     return $Statistics
 }
 
 function Invoke-VmInventoryCommand {
     param([hashtable]$Options, [string]$CloudZone, [string]$Output, [switch]$All)
     $tlsState = $null
+    $csvWriter = $null
     try {
         $tlsState = Start-VmTlsScope $Options
         $client = New-VmClient $Options
-        $inventory = Get-VmInventory $client $CloudZone -All:$All
-        Write-VmCsv $Output $inventory.Rows
-        Write-VmLog "Wrote $($inventory.Rows.Count) verified VM(s) to $Output"
-        if ($inventory.Unverified) {
-            Write-VmLog "INCOMPLETE: $($inventory.Unverified) VM(s) could not be verified" ERROR
+        $csvWriter = Open-VmCsv $Output
+        $inventory = Get-VmInventory $client $CloudZone $csvWriter -All:$All
+        Write-VmLog "Wrote $($inventory.Count) verified VM(s) to $Output"
+        $incompleteDeployments = Get-VmValue $inventory IncompleteDeployments
+        if ($null -eq $incompleteDeployments) { $incompleteDeployments = 0 }
+        if ($inventory.Unverified -or $incompleteDeployments) {
+            Write-VmLog ("INCOMPLETE: {0} VM(s) could not be verified; {1} deployment resource list(s) could not be read" -f
+                $inventory.Unverified, $incompleteDeployments) ERROR
             return 2
         }
         return 0
@@ -882,6 +1007,7 @@ function Invoke-VmInventoryCommand {
         Write-VmLog (Get-VmFailure $_.Exception).Message ERROR
         return 1
     } finally {
+        Close-VmCsv $csvWriter
         Stop-VmTlsScope $tlsState
     }
 }
@@ -918,8 +1044,8 @@ function Invoke-VmDeleteCommand {
             $stats.Failures++
             Write-VmLog ('FAILED: ' + (Get-VmFailure $_.Exception).Message) ERROR
         } finally {
-            Write-VmLog ("SUMMARY successful={0} failures={1} skipped={2} timed_out={3} eligible={4} submitted={5}" -f
-                $stats.Successful, $stats.Failures, $stats.Skipped, $stats.TimedOut, $stats.Eligible, $stats.Submitted)
+            Write-VmLog ("SUMMARY successful={0} failures={1} skipped={2} timed_out={3} eligible={4} submitted={5} processed={6}" -f
+                $stats.Successful, $stats.Failures, $stats.Skipped, $stats.TimedOut, $stats.Eligible, $stats.Submitted, $stats.Processed)
         }
         if ($completed) {
             $code = 0

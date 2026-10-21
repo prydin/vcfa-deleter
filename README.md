@@ -312,6 +312,20 @@ username/password authentication. Redirects are disabled, and credentials/server
 response bodies are not included in HTTP-error messages. Native web cmdlet
 timeouts use whole seconds, so fractional `-Timeout` values round up.
 
+Both PowerShell scripts refresh bearer tokens before requests once the token
+reaches 15 minutes of age. Inventory logs unreadable deployment resource lists
+and individual VM details, excludes unverified data, continues where possible,
+and returns exit code 2 when the resulting CSV is incomplete.
+PowerShell inventory writes each verified record directly to the destination,
+so rows from before a later fatal error remain available in the partial CSV.
+Its output follows API discovery order rather than sorting all VMs in memory.
+
+Pass `-Debug` to either PowerShell script to log every API call's method, path,
+HTTP status, and elapsed time to stderr (and the deletion log file), for example
+`DEBUG: GET /deployment/api/deployments?page=0&size=100 -> 200 in 412 ms`.
+Request bodies, tokens, and credential query values are never logged, and
+`-Debug` does not trigger PowerShell's interactive debug prompts.
+
 ### Aria Automation 8.18 with PowerShell
 
 Both PowerShell scripts accept `-Legacy` for on-premises Aria Automation 8.18.
