@@ -145,6 +145,37 @@ class Client:
             raise InventoryError(f"{context}: invalid JSON response") from None
 
     def authenticate(self, args: argparse.Namespace) -> None:
+        if args.legacy:
+            if args.org:
+                raise InventoryError("--org is not supported with --legacy; use --domain for an identity domain")
+            if args.domain and not args.username:
+                raise InventoryError("--domain requires --username with --legacy")
+            refresh_token = args.api_token
+            if not refresh_token:
+                password = args.password if args.password is not None else getpass.getpass()
+                credentials = {"username": args.username, "password": password}
+                if args.domain:
+                    credentials["domain"] = args.domain
+                body, _ = self.request(
+                    "POST", "/csp/gateway/am/api/login",
+                    params={"access_token": ""},
+                    data=json.dumps(credentials).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                refresh_token = required_text(
+                    self.decode(body, "legacy login"), "refresh_token", "legacy login",
+                )
+            body, _ = self.request(
+                "POST", "/iaas/api/login",
+                data=json.dumps({"refreshToken": refresh_token}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            self.token = required_text(
+                self.decode(body, "legacy token exchange"), "token", "legacy token exchange",
+            )
+            return
+        if args.domain:
+            raise InventoryError("--domain is only supported with --legacy --username")
         if args.api_token:
             if not args.org:
                 raise InventoryError("--org is required for an organization API token")
@@ -289,10 +320,21 @@ class Inventory:
         region_id = required_text(region, "externalRegionId", "cloud zone region")
         endpoint = text(recorded, "endpointId")
         datacenter = text(recorded, "datacenter")
-        if not endpoint or not datacenter:
+        if not endpoint:
             return None
-        if endpoint != account or datacenter != region_id:
+        if endpoint != account:
             return False
+        if datacenter:
+            if datacenter != region_id:
+                return False
+        else:
+            # Aria 8.18 can record the region display name instead of a datacenter MoRef.
+            recorded_region = text(recorded, "region")
+            region_name = text(region, "name")
+            if not recorded_region or not region_name:
+                return None
+            if recorded_region != region_name:
+                return False
         if self.zone_computes is None:
             zone_id = required_text(zone, "id", "cloud zone")
             self.zone_computes = list(self.client.records(
@@ -364,6 +406,7 @@ class Inventory:
                     continue
                 if membership is None:
                     LOG.warning("VM resource %s: zone membership unverified; excluded", resource_id)
+                    LOG.warning("Resource details: %s", resource)
                     self.unverified += 1
                     continue
                 status = sync_status(resource)
@@ -422,13 +465,16 @@ def positive_int(value: str) -> int:
 
 
 def add_connection_arguments(result: argparse.ArgumentParser) -> None:
-    result.add_argument("--host", required=True, help="VCF Automation HTTPS host")
+    result.add_argument("--host", required=True, help="VCF/Aria Automation HTTPS host")
+    result.add_argument("--legacy", action="store_true",
+                        help="Use Aria Automation 8.18 on-premises authentication")
     auth = result.add_mutually_exclusive_group()
     auth.add_argument("--api-token", default=os.environ.get("VCFA_API_TOKEN"),
-                      help="Organization API refresh token; also VCFA_API_TOKEN")
-    auth.add_argument("--username", help="Organization user; password is prompted if omitted")
+                      help="API refresh token (Aria token with --legacy); also VCFA_API_TOKEN")
+    auth.add_argument("--username", help="VCF organization or legacy Aria user; prompts for password if omitted")
     result.add_argument("--password", default=os.environ.get("VCFA_PASSWORD"))
-    result.add_argument("--org", help="Organization name (required with --api-token)")
+    result.add_argument("--org", help="VCF organization name (required with --api-token unless --legacy)")
+    result.add_argument("--domain", help="Identity domain for --legacy --username; not a VCF organization")
     result.add_argument("--api-version", default="2021-07-15", help="IaaS API version")
     result.add_argument("--cloudapi-version", default="40.0", help="Session API version")
     result.add_argument("--page-size", type=positive_int, default=100)

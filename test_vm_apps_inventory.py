@@ -172,6 +172,50 @@ class PaginationTests(unittest.TestCase):
 
 
 class InventoryTests(unittest.TestCase):
+    def test_aria_region_name_fallback_still_requires_scoped_compute_membership(self) -> None:
+        for overrides, expected, unverified in (
+            ({}, True, 0),
+            ({"region": "other"}, False, 0),
+            ({"region": ""}, False, 1),
+            ({"endpointId": "other"}, False, 0),
+            ({"endpointId": ""}, False, 1),
+            ({"computeHostRef": "ResourcePool:other"}, False, 0),
+            ({"vcUuid": ""}, False, 1),
+            ({"datacenter": "other"}, False, 0),
+        ):
+            with self.subTest(overrides=overrides):
+                resource = vm(datacenter="", region="vcf-lab-dc-01")
+                app.properties(resource, "properties").update(overrides)
+                client = inventory_client([resource])
+                client.responses["/iaas/api/regions/region-1"][0]["name"] = "vcf-lab-dc-01"
+                inventory = app.Inventory(client)
+                with patch.object(app.LOG, "warning"):
+                    rows = inventory.collect("Production")
+                self.assertEqual(rows, [row()] if expected else [])
+                self.assertEqual(inventory.unverified, unverified)
+
+    def test_aria_region_name_does_not_replace_provider_region_or_vcenter_checks(self) -> None:
+        for key in ("externalRegionId", "vcUuid"):
+            with self.subTest(key=key):
+                client = inventory_client([vm(datacenter="", region="vcf-lab-dc-01")])
+                client.responses["/iaas/api/regions/region-1"][0]["name"] = "vcf-lab-dc-01"
+                computes = client.responses["/iaas/api/zones/zone-1/computes"][0]["content"]
+                assert isinstance(computes, list)
+                compute = app.object_record(computes[0], "test compute")
+                if key == "vcUuid":
+                    app.properties(compute, "customProperties")[key] = "other"
+                else:
+                    compute[key] = "other"
+                with self.assertRaises(app.InventoryError):
+                    app.Inventory(client).collect("Production")
+
+    def test_aria_region_name_without_region_metadata_is_unverified(self) -> None:
+        client = inventory_client([vm(datacenter="", region="vcf-lab-dc-01")])
+        inventory = app.Inventory(client)
+        with self.assertLogs(app.LOG, level="WARNING"):
+            self.assertEqual(inventory.collect("Production"), [])
+        self.assertEqual(inventory.unverified, 1)
+
     def test_request_count_and_no_machine_scan_or_unnecessary_details(self) -> None:
         client = inventory_client([vm(), vm("b"), {
             "id": "disk", "type": "Cloud.vSphere.Disk",
@@ -272,6 +316,7 @@ class HttpTests(unittest.TestCase):
         client = self.client()
         client.request = Mock(return_value=(b'{"access_token":"access"}', {}))
         client.authenticate(argparse.Namespace(
+            legacy=False, domain=None,
             api_token="secret-token", org="my org", username=None, password=None,
         ))
         self.assertEqual(client.token, "access")
@@ -285,10 +330,106 @@ class HttpTests(unittest.TestCase):
         client = self.client()
         client.request = Mock(return_value=(b"", {"x-vmware-vcloud-access-token": "access"}))
         client.authenticate(argparse.Namespace(
+            legacy=False, domain=None,
             api_token=None, org="tenant", username="user", password="pass",
         ))
         self.assertEqual(client.request.call_args.args, ("POST", "/cloudapi/1.0.0/sessions"))
         self.assertEqual(client.token, "access")
+
+    def legacy_args(self, *options: str) -> argparse.Namespace:
+        with patch.dict("os.environ", {}, clear=True):
+            return app.parser().parse_args([
+                "--host", "example.invalid", "--cloudzone", "Production", "--legacy", *options,
+            ])
+
+    def test_legacy_refresh_token_exchange_without_org(self) -> None:
+        client = self.client()
+        client.request = Mock(return_value=(b'{"token":"legacy-access","tokenType":"Bearer"}', {}))
+        client.authenticate(self.legacy_args("--api-token", "legacy-refresh"))
+        self.assertEqual(client.token, "legacy-access")
+        client.request.assert_called_once_with(
+            "POST", "/iaas/api/login",
+            data=b'{"refreshToken": "legacy-refresh"}',
+            headers={"Content-Type": "application/json"},
+        )
+
+    def test_legacy_username_password_with_optional_domain(self) -> None:
+        for domain in (None, "example.com"):
+            with self.subTest(domain=domain):
+                client = self.client()
+                client.request = Mock(side_effect=[
+                    (b'{"refresh_token":"legacy-refresh"}', {}),
+                    (b'{"token":"legacy-access"}', {}),
+                ])
+                options = ["--username", "user@example.com", "--password", "test-password"]
+                if domain:
+                    options += ["--domain", domain]
+                client.authenticate(self.legacy_args(*options))
+                self.assertEqual(client.token, "legacy-access")
+                login, exchange = client.request.call_args_list
+                self.assertEqual(login.args, ("POST", "/csp/gateway/am/api/login"))
+                self.assertEqual(login.kwargs["params"], {"access_token": ""})
+                expected = {"username": "user@example.com", "password": "test-password"}
+                if domain:
+                    expected["domain"] = domain
+                self.assertEqual(app.json.loads(login.kwargs["data"]), expected)
+                self.assertEqual(login.kwargs["headers"], {"Content-Type": "application/json"})
+                self.assertEqual(exchange.args, ("POST", "/iaas/api/login"))
+                self.assertEqual(app.json.loads(exchange.kwargs["data"]),
+                                 {"refreshToken": "legacy-refresh"})
+
+    def test_legacy_prompts_for_password_and_accepts_unqualified_username(self) -> None:
+        client = self.client()
+        client.request = Mock(side_effect=[
+            (b'{"refresh_token":"refresh"}', {}), (b'{"token":"access"}', {}),
+        ])
+        with patch.object(app.getpass, "getpass", return_value="prompted-password") as prompt:
+            client.authenticate(self.legacy_args("--username", "configurationadmin"))
+        prompt.assert_called_once()
+        self.assertEqual(app.json.loads(client.request.call_args_list[0].kwargs["data"]),
+                         {"username": "configurationadmin", "password": "prompted-password"})
+
+    def test_legacy_rejects_incompatible_org_and_domain_options_before_requests(self) -> None:
+        for options in (
+            ("--api-token", "refresh", "--org", "tenant"),
+            ("--api-token", "refresh", "--domain", "example.com"),
+        ):
+            with self.subTest(options=options):
+                client = self.client()
+                client.request = Mock()
+                with self.assertRaises(app.InventoryError):
+                    client.authenticate(self.legacy_args(*options))
+                client.request.assert_not_called()
+        args = self.legacy_args("--username", "user", "--domain", "example.com")
+        args.legacy = False
+        client = self.client()
+        client.request = Mock()
+        with self.assertRaisesRegex(app.InventoryError, "--domain"):
+            client.authenticate(args)
+        client.request.assert_not_called()
+
+    def test_legacy_malformed_or_missing_tokens_fail_without_fallback(self) -> None:
+        for responses, options, calls in (
+            ([(b'{}', {})], ("--username", "user", "--password", "pass"), 1),
+            ([(b'not-json', {})], ("--api-token", "refresh"), 1),
+            ([(b'{"access_token":"wrong-field"}', {})], ("--api-token", "refresh"), 1),
+            ([(b'{"token":""}', {})], ("--api-token", "refresh"), 1),
+            ([(b'{"refresh_token":"refresh"}', {}), (b'{}', {})],
+             ("--username", "user", "--password", "pass"), 2),
+        ):
+            with self.subTest(responses=responses):
+                client = self.client()
+                client.request = Mock(side_effect=responses)
+                with self.assertRaises(app.InventoryError):
+                    client.authenticate(self.legacy_args(*options))
+                self.assertEqual(client.request.call_count, calls)
+
+    def test_legacy_http_error_does_not_retry_or_change_authentication_modes(self) -> None:
+        client = self.client()
+        client.request = Mock(side_effect=app.ApiError("POST", "/iaas/api/login", 401))
+        with self.assertRaises(app.ApiError):
+            client.authenticate(self.legacy_args("--api-token", "refresh"))
+        client.request.assert_called_once()
 
     def test_request_parameters_and_bearer(self) -> None:
         client = self.client()
@@ -325,6 +466,36 @@ class HttpTests(unittest.TestCase):
 
 @patch.dict("os.environ", {}, clear=True)
 class OutputAndCliTests(unittest.TestCase):
+    def test_legacy_inventory_main_authenticates_before_collecting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.csv"
+
+            def collect(inventory: app.Inventory, zone: str, *,
+                        include_all: bool = True) -> list[app.InventoryRow]:
+                self.assertEqual(inventory.client.token, "legacy-access")
+                self.assertEqual(zone, "Production")
+                self.assertFalse(include_all)
+                return [row(status="missing")]
+
+            with patch.object(app.Client, "request", return_value=(b'{"token":"legacy-access"}', {})), \
+                 patch.object(app.Inventory, "collect", collect), self.assertLogs(app.LOG):
+                result = app.main([
+                    "--host", "example.invalid", "--legacy", "--api-token", "legacy-refresh",
+                    "--cloudzone", "Production", "--output", str(path),
+                ])
+            self.assertEqual(result, 0)
+            with path.open(encoding="utf-8-sig", newline="") as handle:
+                self.assertEqual(list(csv.DictReader(handle))[0]["status"], "missing")
+
+    def test_legacy_defaults_and_environment_token(self) -> None:
+        base = ["--host", "host", "--cloudzone", "Production"]
+        self.assertFalse(app.parser().parse_args(base).legacy)
+        with patch.dict("os.environ", {"VCFA_API_TOKEN": "legacy-refresh"}):
+            args = app.parser().parse_args([*base, "--legacy"])
+            self.assertTrue(args.legacy)
+            self.assertEqual(args.api_token, "legacy-refresh")
+            self.assertIsNone(args.org)
+
     def test_missing_only_default_and_all_statuses(self) -> None:
         resources = [
             vm("a", powerState="ON"),

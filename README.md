@@ -1,5 +1,9 @@
 # VM Apps cloud-zone inventory
 
+**Development focus:** the PowerShell versions are actively maintained. The
+Python scripts and tests are retained in place as a frozen reference.
+Start with [PowerShell versions](#powershell-versions) for current usage.
+
 [vm_apps_inventory.py](vm_apps_inventory.py) is a read-only Python CLI intended
 for VCF Automation 9.1.1 VM Apps organization inventory. It does not delete,
 refresh, power on, or otherwise modify VMs. POST requests are used only for
@@ -14,6 +18,9 @@ access token):
 $env:VCFA_API_TOKEN = '<organization-api-token>'
 python .\vm_apps_inventory.py --host vcfa.example.com --org MyOrganization --cloudzone "Production" --output .\production-vms.csv
 ```
+
+Native PowerShell versions are also available; see
+[PowerShell versions](#powershell-versions) below.
 
 Alternatively, supply `--api-token` explicitly. Environment variables avoid
 placing credentials in command-line history and process arguments.
@@ -58,6 +65,75 @@ Other options:
 - `--cloudapi-version` for organization session login (default `40.0`).
 - `--output` (default `vm_inventory.csv`).
 
+## Aria Automation 8.18 compatibility (Python reference)
+
+Both Python scripts accept `--legacy` for **on-premises Aria Automation 8.18**
+authentication. Without this flag they retain the VCF Automation 9.1.1 flow.
+For PowerShell, use `-Legacy` as described in
+[PowerShell versions](#powershell-versions).
+
+With `--legacy`, `--api-token` (or `VCFA_API_TOKEN`) must contain an **Aria
+refresh token**, not an access token or a VCF organization token. It is exchanged
+using `POST /iaas/api/login` with JSON `{"refreshToken":"..."}`; the response's
+`token` is used for subsequent Bearer authentication. No `--org` is required.
+
+```powershell
+$env:VCFA_API_TOKEN = '<aria-refresh-token>'
+python .\vm_apps_inventory.py --legacy --host aria.example.com --cloudzone "Production" --output .\legacy-vms.csv
+python .\vm_apps_delete.py --legacy --host aria.example.com --input .\legacy-vms.csv
+```
+
+Alternatively, supply `--username` and optionally `--password`/`VCFA_PASSWORD`.
+Omitting the password prompts securely. Remove `VCFA_API_TOKEN` first if using
+username/password:
+
+```powershell
+Remove-Item Env:VCFA_API_TOKEN -ErrorAction SilentlyContinue
+python .\vm_apps_inventory.py --legacy --host aria.example.com --username administrator --domain example.com --cloudzone "Production" --output .\legacy-vms.csv
+python .\vm_apps_delete.py --legacy --host aria.example.com --username administrator --domain example.com --input .\legacy-vms.csv
+```
+
+This first sends JSON `username`, `password` and optional `domain` to
+`POST /csp/gateway/am/api/login?access_token=`, then exchanges the returned
+`refresh_token` through `/iaas/api/login`. Usernames are sent unchanged;
+`--domain` is optional and is not appended to the username. `--org` is rejected
+in legacy mode to avoid silently confusing an organization with an identity
+domain. `--domain` is accepted only with `--legacy --username`.
+The VCF-specific `--cloudapi-version` is unused in legacy mode.
+
+TLS remains verified by default in both Python modes; the existing `--ca-bundle`
+and explicit `--insecure` options still apply. No automatic authentication
+fallback or retry is performed on authentication failures.
+
+Legacy mode changes authentication only. CSV layout, Missing-only filtering,
+fresh cloud-zone/VM validation and deletion safeguards are unchanged. The
+existing IaaS API version (`2021-07-15`) remains configurable using `--api-version`.
+Deletion still defaults to dry run; `--execute` is required to submit requests.
+Missing or incompatible resource data fails closed rather than relaxing checks.
+
+Legacy authentication and both CLI integrations are covered by mocked tests.
+This has **not been validated against a live Aria Automation 8.18 system**;
+first run inventory and review a deletion dry run before considering execution.
+Authentication shapes follow the public
+[VMware Aria refresh-token guide](https://github.com/vmware/terraform-provider-vra/blob/master/docs/refresh_token_vra.md)
+and [IaaS API schema](https://github.com/vmware/vra-sdk-go/blob/master/swagger/vra-iaas.json).
+
+### Checking legacy region placement fields
+
+If inventory reports `zone membership unverified`, the read-only
+[vm_apps_check_region.py](vm_apps_check_region.py) helper prints the selected
+zone's region `id`, `name`, `externalRegionId` and `cloudAccountId`:
+
+```powershell
+python .\vm_apps_check_region.py --legacy --host aria.example.com --username administrator --domain example.com --cloudzone "Production"
+```
+
+It supports the same connection/authentication/TLS options as both Python
+scripts. Output is JSON on stdout; credentials and unrelated API fields are
+not printed. Missing region fields appear as empty strings. This helper does
+not change membership rules or modify resources; it helps compare an Aria
+VM's recorded region name with the cloud zone's provider region identifiers.
+
 ## Verification and output
 
 1. Resolve the exact, case-sensitive cloud-zone name. Zero matches or duplicate
@@ -78,7 +154,13 @@ Other options:
    cloud account (`endpointId`), external region (`datacenter`), and
    compute/resource vCenter UUID. Region and compute membership are cached
    once per run. A region
-   match alone never proves membership. References to computes outside the
+   match alone never proves membership. For Aria 8.18 records without
+   `datacenter`, match `properties.region` exactly against the fetched zone
+   region's `name` instead. The compute member must still match that region's
+   `externalRegionId`, the VM's cloud account and vCenter UUID. An explicit
+   conflicting `datacenter` is never overridden by a matching region name.
+   This shared fallback also applies during deletion validation in both languages.
+   References to computes outside the
    zone's returned member list are excluded; no parent-cluster membership is
    inferred from names or resource-pool paths.
 5. Use the enclosing deployment's name and the fresh resource's
@@ -146,8 +228,8 @@ snapshot across these reads; inventory changes can require a rerun.
 Authentication uses `POST /oauth/tenant/{org}/token` with
 `grant_type=refresh_token`, or Basic authentication to
 `POST /cloudapi/1.0.0/sessions` and the
-`X-VMWARE-VCLOUD-ACCESS-TOKEN` response header. This intentionally does not use
-the older Aria CSP login flow.
+`X-VMWARE-VCLOUD-ACCESS-TOKEN` response header. The older Aria CSP login flow is used only when `--legacy` is explicitly set,
+as described above.
 
 Inventory uses `/iaas/api/zones`, `/deployment/api/deployments`, and each
 deployment's resources collection and individual resource endpoints.
@@ -179,6 +261,167 @@ Run the tests:
 ```powershell
 python -m unittest -v test_vm_apps_inventory
 ```
+
+## PowerShell versions
+
+[vm_apps_inventory.ps1](vm_apps_inventory.ps1) and
+[vm_apps_delete.ps1](vm_apps_delete.ps1) implement the same workflows without
+Python or PowerCLI. Keep [VmApps.Common.psm1](VmApps.Common.psm1) in the same
+directory as both scripts. Windows PowerShell **5.1** is the tested runtime.
+Only built-in PowerShell/.NET components are needed. Requests use
+`Invoke-WebRequest`; there is no embedded C# or custom transport class.
+
+Use native PowerShell parameters (one leading hyphen, not Python's `--`):
+
+```powershell
+$env:VCFA_API_TOKEN = '<organization-api-token>'
+
+# Export only Missing VMs, or add -All for every synchronization status.
+.\vm_apps_inventory.ps1 -Server vcfa.example.com -Org MyOrganization -CloudZone "Production" -Output .\production-vms.csv
+.\vm_apps_inventory.ps1 -Server vcfa.example.com -Org MyOrganization -CloudZone "Production" -Output .\all-vms.csv -All
+
+# Validate and report what would be deleted, without submitting deletes.
+.\vm_apps_delete.ps1 -Server vcfa.example.com -Org MyOrganization -InputCsv .\production-vms.csv
+
+# Destructive: delete eligible deployments and wait for completion.
+.\vm_apps_delete.ps1 -Server vcfa.example.com -Org MyOrganization -InputCsv .\production-vms.csv -Execute -Parallel 5 -PollInterval 5 -RequestTimeout 300
+```
+
+`-Host` is an alias for `-Server`, and `-Input` is an alias for `-InputCsv`.
+The alternative names avoid PowerShell's built-in `$Host` and `$Input`
+variables. Parameter names are case-insensitive. Other parameter equivalents:
+
+| Python | PowerShell | Default |
+|---|---|---|
+| `--api-token` | `-ApiToken` | `VCFA_API_TOKEN` |
+| `--username` | `-Username` | none |
+| `--password` | `-Password` | `VCFA_PASSWORD`, otherwise secure prompt |
+| `--org` | `-Org` | none |
+| `--legacy` | `-Legacy` | disabled (VCF authentication) |
+| `--domain` | `-Domain` | none; legacy username/password only |
+| `--insecure` | `-Insecure` | disabled; certificates validated |
+| `--api-version` | `-ApiVersion` | `2021-07-15` |
+| `--cloudapi-version` | `-CloudApiVersion` | `40.0` |
+| `--page-size` | `-PageSize` | `100` |
+| `--timeout` | `-Timeout` | `60` seconds |
+| `--log-file` | `-LogFile` | `deployment-deletions.log` |
+
+For username/password authentication, remove `VCFA_API_TOKEN` and supply
+`-Username`; omit `-Password` to prompt securely. Do not combine token and
+username/password authentication. Redirects are disabled, and credentials/server
+response bodies are not included in HTTP-error messages. Native web cmdlet
+timeouts use whole seconds, so fractional `-Timeout` values round up.
+
+### Aria Automation 8.18 with PowerShell
+
+Both PowerShell scripts accept `-Legacy` for on-premises Aria Automation 8.18.
+VCF Automation authentication remains the default when the switch is absent.
+
+Using an Aria refresh token (not a VCF organization token or bearer access token):
+
+```powershell
+$env:VCFA_API_TOKEN = '<aria-refresh-token>'
+.\vm_apps_inventory.ps1 -Legacy -Server aria.example.com -CloudZone "vc-01 / vcf-lab-dc-01" -Output .\legacy-vms.csv
+.\vm_apps_delete.ps1 -Legacy -Server aria.example.com -InputCsv .\legacy-vms.csv
+```
+
+Or use username/password with an optional identity domain. The password is
+prompted securely if neither `-Password` nor `VCFA_PASSWORD` is supplied:
+
+```powershell
+Remove-Item Env:VCFA_API_TOKEN -ErrorAction SilentlyContinue
+.\vm_apps_inventory.ps1 -Legacy -Server aria.example.com -Username administrator -Domain example.com -CloudZone "vc-01 / vcf-lab-dc-01" -Output .\legacy-vms.csv
+.\vm_apps_delete.ps1 -Legacy -Server aria.example.com -Username administrator -Domain example.com -InputCsv .\legacy-vms.csv
+```
+
+With `-Legacy`, refresh tokens are exchanged using JSON `refreshToken` at
+`POST /iaas/api/login`, taking the response's `token` as the bearer token.
+Username/password first obtains `refresh_token` from
+`POST /csp/gateway/am/api/login?access_token=`. The username is sent unchanged;
+`-Domain` is optional. `-Org` is rejected in legacy mode, and `-Domain` is
+accepted only with `-Legacy -Username`. `-CloudApiVersion` is unused in legacy
+mode. Authentication failures do not trigger retries or fallback to VCF login.
+
+The Aria placement fallback is also ported: when `properties.datacenter` is
+absent, `properties.region` must match the fetched zone region's `name` exactly.
+Cloud-account, compute member, provider-region and vCenter UUID checks still
+apply. A conflicting explicit datacenter is not overridden by a region name.
+This is shared by inventory and whole-deployment deletion validation.
+
+CSV format, Missing-only filtering and deletion safety checks are unchanged.
+Deletion defaults to dry run; only `-Execute` submits actions. Legacy behavior
+is covered by mocked tests but has not been tested against a live 8.18 server.
+
+### PowerShell TLS behavior
+
+Certificate validation is **enabled by default**. On either PowerShell script,
+`-Insecure` disables certificate trust, expiry and hostname checks.
+HTTPS encryption remains, but the server's identity is not
+verified. An interceptor could obtain API tokens/passwords or alter API responses,
+including the records used by deletion safety checks. Use only in controlled,
+trusted environments. A warning is printed before authentication (and recorded
+in the deletion log) only when `-Insecure` is specified. `-CaBundle` is not
+supported; install your organization's CA in the Windows trust store instead.
+Python's existing TLS options are unchanged.
+
+On Windows PowerShell 5.1 with `-Insecure`, a process-wide certificate callback
+is replaced once before authentication and restored when the command exits
+through `finally`, including on errors or caught interruptions. Other HTTPS work
+in the same process is affected throughout the command; run these scripts in a
+dedicated process (for example, `powershell.exe -File .\vm_apps_inventory.ps1 ...`).
+Without `-Insecure`, the existing process callback is not changed. A small .NET
+expression builds the constant-true callback so it can run on network threads
+without a PowerShell runspace. On PowerShell 7, the native per-request
+`-SkipCertificateCheck` switch is used only with `-Insecure` instead (5.1 is the
+tested runtime). Forced process termination cannot guarantee `finally` cleanup.
+
+Both implementations use the same UTF-8 BOM CSV columns, so either inventory
+script can feed either deletion script. PowerShell inventory additionally appends
+an informational `powerStatus` column, read directly from the fresh deployment
+resource's `properties.powerState` (for example, `ON` or `OFF`). Missing, empty or
+non-string values produce `unknown` and a warning; no alternative fields are
+guessed and no extra machine requests are made for power state. The frozen Python
+inventory format is unchanged.
+
+PowerShell CSV columns:
+
+```csv
+vm_name,deployment_name,status,vm_id,resource_id,deployment_id,cloudzone,cloudzone_id,powerStatus
+```
+
+PowerShell deletion reads and retains `powerStatus`, but it is informational only:
+it does not authorize or prevent deletion. Older enriched CSVs without it are
+still accepted; absent or empty values are read as `unknown`. Both deletion
+implementations use fresh top-level `syncStatus`, not CSV power state, to check
+for Missing VMs. The PowerShell deletion script defaults to dry run and performs
+the same whole-deployment checks, five-slot single-threaded scheduler,
+monotonic timeouts, no-retry submission policy, deployment-disappearance
+confirmation and persistent statistics described below. All existing race,
+remote-timeout and visibility limitations also apply.
+
+Operational exit codes are the same: `0` success, `1` failure, `2` incomplete
+inventory or skipped-only deletion, and `130` for an interruption caught by the
+script. Native PowerShell parameter-binding errors use PowerShell's own exit
+behavior (normally `1` under `powershell.exe -File`, not argparse's `2`).
+PowerShell host termination can prevent cleanup/summary logging; outstanding
+server operations are not cancelled.
+
+Use `Get-Help .\vm_apps_inventory.ps1 -Full` or
+`Get-Help .\vm_apps_delete.ps1 -Full` for parameter discovery. If local execution
+policy blocks unsigned scripts, follow your organization's signing/execution
+policy; the scripts do not change it.
+
+Run the PowerShell regression tests with the Windows-bundled Pester 3.4:
+
+```powershell
+$result = Invoke-Pester -Script .\VmApps.Tests.ps1 -PassThru
+if ($result.FailedCount) { throw "PowerShell tests failed" }
+```
+
+No live delete is used by the tests. VCF API behavior is tested with mocked
+records/requests, and HTTP/TLS transport is exercised against a loopback-only
+fixture. Only the test fixture uses compiled C#; it is not needed to run either
+script. The PowerShell scripts have not been validated against a live VCF server.
 
 ## Safe deletion of missing deployments
 

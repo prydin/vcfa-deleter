@@ -57,6 +57,29 @@ class InputTests(unittest.TestCase):
 
 
 class ValidationTests(unittest.TestCase):
+    def test_aria_region_name_fallback_checks_all_deployment_vms(self) -> None:
+        for overrides, qualifies in (
+            ({}, True),
+            ({"region": "other"}, False),
+            ({"endpointId": "other"}, False),
+            ({"computeHostRef": "ResourcePool:other"}, False),
+            ({"datacenter": "other"}, False),
+        ):
+            with self.subTest(overrides=overrides):
+                second = {**vm("b", datacenter="", region="vcf-lab-dc-01"), "syncStatus": "MISSING"}
+                app.properties(second, "properties").update(overrides)
+                resources = [
+                    {**vm(datacenter="", region="vcf-lab-dc-01"), "syncStatus": "MISSING"}, second,
+                ]
+                client = deletion_client(resources)
+                client.responses["/iaas/api/regions/region-1"][0]["name"] = "vcf-lab-dc-01"
+                deployment = target(rows=(row(), row("b")))
+                if qualifies:
+                    delete.validate_target(client, deployment)
+                else:
+                    with self.assertRaises(delete.CheckFailed):
+                        delete.validate_target(client, deployment)
+
     def test_valid_missing_vm_with_compute_reference(self) -> None:
         client = deletion_client()
         delete.validate_target(client, target())
@@ -333,6 +356,29 @@ class ChalkboardTests(unittest.TestCase):
 
 @patch.dict("os.environ", {}, clear=True)
 class CliTests(unittest.TestCase):
+    def test_legacy_delete_main_authenticates_and_preserves_default_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.csv"
+            logfile = Path(directory) / "legacy.log"
+            app.write_csv(path, [row(status="missing")])
+
+            def validate(client: app.Client, target: delete.Target) -> None:
+                self.assertEqual(client.token, "legacy-access")
+                self.assertEqual(target.deployment_id, "dep-1")
+
+            with patch.object(app.Client, "request", return_value=(b'{"token":"legacy-access"}', {})) as request, \
+                 patch.object(delete, "validate_target", side_effect=validate) as check, \
+                 patch.object(delete, "submit_delete") as submit, self.assertLogs():
+                result = delete.main([
+                    "--host", "example.invalid", "--legacy", "--api-token", "legacy-refresh",
+                    "--input", str(path), "--log-file", str(logfile),
+                ])
+            self.assertEqual(result, 0)
+            self.assertEqual(request.call_args.args, ("POST", "/iaas/api/login"))
+            check.assert_called_once()
+            submit.assert_not_called()
+            self.assertIn("would be deleted", logfile.read_text())
+
     def test_defaults(self) -> None:
         args = delete.parser().parse_args(["--host", "host", "--input", "vms.csv"])
         self.assertFalse(args.execute)

@@ -18,3 +18,35 @@
 2026-10-19 11:44:12,281 WARNING: SKIPPED deployment 3cc625ef-29b0-4869-ba1c-cbf2104b43ba: VM 22560c65-7ed8-4174-82d5-b214599390ac: current state is not Missing
 2026-10-19 11:44:12,487 WARNING: SKIPPED deployment e3989e57-274a-4f98-a64f-16a623dd02dd: VM 32ddb146-6630-4aa5-a658-a592b098d8bb: current state is not Missing
 2026-10-19 11:44:12,487 INFO: SUMMARY successful=0 failures=0 skipped=2 timed_out=0 eligible=0 submitted=0
+2026-10-20 08:24:28,398 INFO: Loaded 3 deployments; mode=DRY RUN, slots=5
+2026-10-20 08:24:28,413 WARNING: TLS certificate verification is disabled
+2026-10-20 08:24:29,049 INFO: DRY RUN: deployment 3cc625ef-29b0-4869-ba1c-cbf2104b43ba (4) would be deleted; no delete submitted
+2026-10-20 08:24:29,291 INFO: DRY RUN: deployment e3989e57-274a-4f98-a64f-16a623dd02dd (Test VM) would be deleted; no delete submitted
+2026-10-20 08:24:29,532 INFO: DRY RUN: deployment 91d114fe-030f-4b18-8376-b7ce71e8aa1b (Test 1) would be deleted; no delete submitted
+2026-10-20 08:24:29,532 INFO: SUMMARY successful=0 failures=0 skipped=0 timed_out=0 eligible=3 submitted=0
+2026-10-20 08:24:53,154 INFO: Loaded 3 deployments; mode=EXECUTE, slots=5
+2026-10-20 08:24:53,166 WARNING: TLS certificate verification is disabled
+2026-10-20 08:24:55,348 INFO: SUBMITTED deployment 3cc625ef-29b0-4869-ba1c-cbf2104b43ba request 00887a5a-0a03-447e-8129-d661ecea23fe
+2026-10-20 08:24:55,818 INFO: SUBMITTED deployment e3989e57-274a-4f98-a64f-16a623dd02dd request 3ff092cf-649d-4314-aa0a-a26a357d7f64
+2026-10-20 08:24:56,302 INFO: SUBMITTED deployment 91d114fe-030f-4b18-8376-b7ce71e8aa1b request e72bab26-8d8a-4776-bd81-eba5770c20b5
+2026-10-20 08:25:47,646 INFO: DELETED deployment 3cc625ef-29b0-4869-ba1c-cbf2104b43ba request 00887a5a-0a03-447e-8129-d661ecea23fe
+2026-10-20 08:25:47,706 INFO: DELETED deployment e3989e57-274a-4f98-a64f-16a623dd02dd request 3ff092cf-649d-4314-aa0a-a26a357d7f64
+2026-10-20 08:25:47,771 INFO: DELETED deployment 91d114fe-030f-4b18-8376-b7ce71e8aa1b request e72bab26-8d8a-4776-bd81-eba5770c20b5
+2026-10-20 08:25:47,771 INFO: SUMMARY successful=3 failures=0 skipped=0 timed_out=0 eligible=3 submitted=3
+2026-10-21 09:33:42,918 INFO: Loaded 1 deployments; mode=EXECUTE, slots=5
+2026-10-21 09:33:42,929 WARNING: TLS certificate verification is disabled
+2026-10-21 09:36:23,867 ERROR: Interrupted; server requests are not cancelled. Consult the SUBMITTED entries before retrying.
+2026-10-21 09:36:23,867 INFO: SUMMARY successful=0 failures=0 skipped=0 timed_out=0 eligible=0 submitted=0
+2026-10-21 09:51:49,906 INFO: Loaded 1 deployments; mode=DRY RUN, slots=5
+2026-10-21 09:51:49,917 WARNING: TLS certificate verification is disabled
+2026-10-21 09:52:15,028 ERROR: FAILED: POST /csp/gateway/am/api/login: connection/TLS failure (URLError); check connectivity and the CA certificate
+2026-10-21 09:52:15,029 INFO: SUMMARY successful=0 failures=1 skipped=0 timed_out=0 eligible=0 submitted=0
+2026-10-21 09:53:33,387 INFO: Loaded 1 deployments; mode=DRY RUN, slots=5
+2026-10-21 09:53:33,398 WARNING: TLS certificate verification is disabled
+2026-10-21 09:53:43,189 INFO: DRY RUN: deployment 6ab9b4b8-e279-4f2f-8b02-b78ca9ff7b62 (Test 1) would be deleted; no delete submitted
+2026-10-21 09:53:43,190 INFO: SUMMARY successful=0 failures=0 skipped=0 timed_out=0 eligible=1 submitted=0
+2026-10-21 09:54:22,139 INFO: Loaded 1 deployments; mode=EXECUTE, slots=5
+2026-10-21 09:54:22,149 WARNING: TLS certificate verification is disabled
+2026-10-21 09:54:32,492 INFO: SUBMITTED deployment 6ab9b4b8-e279-4f2f-8b02-b78ca9ff7b62 request 794e4a60-8eaf-43fb-bfd4-9f1854c2f10f
+2026-10-21 09:54:42,682 INFO: DELETED deployment 6ab9b4b8-e279-4f2f-8b02-b78ca9ff7b62 request 794e4a60-8eaf-43fb-bfd4-9f1854c2f10f
+2026-10-21 09:54:42,682 INFO: SUMMARY successful=1 failures=0 skipped=0 timed_out=0 eligible=1 submitted=1
