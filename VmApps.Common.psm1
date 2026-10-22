@@ -811,10 +811,74 @@ function Assert-VmTarget {
             throw [VmCheckFailedException]::new("VM $($row.vm_id): cloud-zone membership cannot be verified")
         }
     }
+    # Unregister only removes VMs from management; it is used when every VM offers it.
+    $steps = @(foreach ($candidate in $vms) {
+        $resourceId = Get-VmText $candidate id
+        $actionId = Get-VmUnregisterAction (Get-VmResourceActions $Client $Target.DeploymentId $resourceId)
+        if (-not $actionId) { break }
+        [pscustomobject]@{ ResourceId = $resourceId; ActionId = $actionId }
+    })
+    if ($steps.Count -eq $vms.Count) {
+        $plan = New-VmRemovalPlan unregister $steps
+    } else {
+        # Deployment.Delete deprovisions every resource, so each one must be Missing too.
+        foreach ($candidate in $candidates) {
+            if (Test-VmResource $candidate) { continue }
+            $resourceId = Get-VmRequiredText $candidate id $path
+            $type = Get-VmText $candidate type
+            $resource = Get-VmRecord $Client ('{0}/{1}' -f $path, (ConvertTo-VmIdentifier $resourceId))
+            if ((Get-VmText $resource id) -cne $resourceId -or (Get-VmText $resource type) -cne $type) {
+                throw [VmCheckFailedException]::new("Resource ${resourceId}: identity/type changed")
+            }
+            if ((Get-VmSyncStatus $resource) -ine 'missing') {
+                throw [VmCheckFailedException]::new("Resource $resourceId ($type) is not Missing; deployment delete refused")
+            }
+        }
+        $plan = New-VmRemovalPlan delete
+    }
     $latest = @(Get-VmRecords $Client $path)
     if (-not (Get-VmResourceSet $candidates).SetEquals((Get-VmResourceSet $latest))) {
         throw [VmCheckFailedException]::new('Deployment resources changed during validation')
     }
+    return $plan
+}
+
+function New-VmRemovalPlan {
+    param([ValidateSet('unregister', 'delete')][string]$Method = 'delete', [object[]]$Steps = @())
+    if ($Method -ceq 'delete') { $Steps = @([pscustomobject]@{ ResourceId = ''; ActionId = 'Deployment.Delete' }) }
+    return [pscustomobject]@{ Method = $Method; Steps = $Steps }
+}
+
+function Get-VmResourceActions {
+    param($Client, [string]$DeploymentId, [string]$ResourceId)
+    $path = '/deployment/api/deployments/{0}/resources/{1}/actions' -f
+        (ConvertTo-VmIdentifier $DeploymentId), (ConvertTo-VmIdentifier $ResourceId)
+    $body = (Invoke-VmRequest $Client GET $path).Body
+    $trimmed = ([string]$body).TrimStart()
+    if ($trimmed.StartsWith('{')) {
+        $items = Get-VmValue (ConvertFrom-VmJson $body $path) content
+        if ($items -isnot [array]) { throw [VmInventoryException]::new("${path}: expected a content array") }
+    } elseif ($trimmed.StartsWith('[')) {
+        try { $parsed = ConvertFrom-Json -InputObject $body -ErrorAction Stop }
+        catch { throw [VmInventoryException]::new("${path}: invalid JSON response") }
+        # Windows PowerShell emits a top-level JSON array as one object; unroll it.
+        $items = @(foreach ($item in $parsed) { $item })
+    } else {
+        throw [VmInventoryException]::new("${path}: invalid JSON response")
+    }
+    return @(foreach ($item in $items) { Assert-VmObject $item $path })
+}
+
+function Get-VmUnregisterAction {
+    param([object[]]$Actions)
+    $found = @(foreach ($action in $Actions) {
+        $id = Get-VmText $action id
+        if (($id -and ($id -split '\.')[-1] -ieq 'Unregister') -or (Get-VmText $action name) -ieq 'Unregister') { $action }
+    })
+    # Absent, ambiguous or currently disallowed Unregister actions are treated as unavailable.
+    if ($found.Count -ne 1) { return '' }
+    if ((Get-VmValue $found[0] valid) -ceq $false) { return '' }
+    return Get-VmText $found[0] id
 }
 
 function Submit-VmDelete {
@@ -828,6 +892,18 @@ function Submit-VmDelete {
     return Get-VmRequiredText (ConvertFrom-VmJson $reply.Body $path) id 'Delete request response'
 }
 
+function Submit-VmUnregister {
+    param($Client, $Target, $Step)
+    $path = '/deployment/api/deployments/{0}/resources/{1}/requests' -f
+        (ConvertTo-VmIdentifier $Target.DeploymentId), (ConvertTo-VmIdentifier $Step.ResourceId)
+    $body = ConvertTo-Json -Compress -InputObject @{
+        actionId = $Step.ActionId; inputs = @{}
+        reason = 'CSV cleanup: VM verified Missing in the recorded cloud zone; unregister only'
+    }
+    $reply = Invoke-VmRequest $Client POST $path -Body $body -Headers @{ 'Content-Type' = 'application/json' }
+    return Get-VmRequiredText (ConvertFrom-VmJson $reply.Body $path) id 'Unregister request response'
+}
+
 function Get-VmDeletionOutcome {
     param($Client, $Outstanding)
     $record = Get-VmRecord $Client ('/deployment/api/requests/{0}' -f (ConvertTo-VmIdentifier $Outstanding.RequestId))
@@ -838,23 +914,28 @@ function Get-VmDeletionOutcome {
     if ($depId -and $depId -cne $Outstanding.Target.DeploymentId) {
         throw [VmInventoryException]::new('Request status returned a different deployment ID')
     }
+    $step = Get-VmValue $Outstanding Step
+    $expectedAction = 'Deployment.Delete'
+    if ($null -ne $step -and $step.ResourceId) { $expectedAction = $step.ActionId }
     $action = Get-VmText $record actionId
-    if ($action -and $action -cne 'Deployment.Delete') {
+    if ($action -and $action -cne $expectedAction) {
         throw [VmInventoryException]::new('Request status returned a different action')
     }
-    $status = (Get-VmRequiredText $record status 'Delete request status').ToUpperInvariant()
+    $status = (Get-VmRequiredText $record status 'Request status').ToUpperInvariant()
     if ($status -cin @('FAILED', 'ABORTED', 'APPROVAL_REJECTED', 'CANCELLED', 'CANCELED')) {
         Write-VmLog "Request $($Outstanding.RequestId) reached terminal failure status $status" ERROR
         return 'failed'
     }
     if ($status -ceq 'SUCCESSFUL') {
-        # Request success alone is insufficient: the deployment must actually disappear.
-        try { $null = Get-VmRecord $Client ('/deployment/api/deployments/{0}' -f (ConvertTo-VmIdentifier $Outstanding.Target.DeploymentId)) }
+        # Request success alone is insufficient: the deployment or unregistered VM must actually disappear.
+        $gone = '/deployment/api/deployments/{0}' -f (ConvertTo-VmIdentifier $Outstanding.Target.DeploymentId)
+        if ($expectedAction -cne 'Deployment.Delete') { $gone += '/resources/' + (ConvertTo-VmIdentifier $step.ResourceId) }
+        try { $null = Get-VmRecord $Client $gone }
         catch {
             if (Test-VmApiStatus $_.Exception 404) { return 'successful' }
             throw
         }
-        Write-VmLog "Request $($Outstanding.RequestId) successful; waiting for deployment disappearance"
+        Write-VmLog "Request $($Outstanding.RequestId) successful; waiting for resource disappearance"
     } elseif ($status -cnotin @('CREATED', 'PENDING', 'INITIALIZATION', 'CHECKING_APPROVAL',
         'APPROVAL_PENDING', 'USER_INTERACTION_PENDING', 'INPROGRESS', 'COMPLETION')) {
         Write-VmLog "Request $($Outstanding.RequestId): unrecognized status $status; retaining slot" WARNING
@@ -865,8 +946,32 @@ function Get-VmDeletionOutcome {
 function New-VmStatistics {
     return [pscustomobject]@{
         Successful = 0; Failures = 0; Skipped = 0; TimedOut = 0
-        Eligible = 0; Submitted = 0; Processed = 0
+        Eligible = 0; Submitted = 0; Processed = 0; Unregistered = 0; Deleted = 0
     }
+}
+
+function Start-VmPlanStep {
+    param($Client, $Outstanding, $RequestIds, $Statistics)
+    $target = $Outstanding.Target
+    $step = $Outstanding.Step
+    $Outstanding.Started = Get-VmMonotonicTime
+    try {
+        if ($Outstanding.Plan.Method -ceq 'unregister') { $requestId = Submit-VmUnregister $Client $target $step }
+        else { $requestId = Submit-VmDelete $Client $target }
+        if (-not $RequestIds.Add($requestId)) { throw [VmInventoryException]::new('Server returned a duplicate request ID') }
+    } catch {
+        $Statistics.Failures++
+        Write-VmLog ("FAILED {0} submission for deployment {1}: {2}. Outcome may be uncertain; check the server before retrying. No automatic resubmission." -f
+            $Outstanding.Plan.Method, $target.DeploymentId, (Get-VmFailure $_.Exception).Message) ERROR
+        return $false
+    }
+    $Outstanding.RequestId = $requestId
+    if ($Outstanding.Plan.Method -ceq 'unregister') {
+        Write-VmLog "SUBMITTED unregister ($($step.ActionId)) of VM resource $($step.ResourceId) in deployment $($target.DeploymentId) request $requestId"
+    } else {
+        Write-VmLog "SUBMITTED delete of deployment $($target.DeploymentId) request $requestId"
+    }
+    return $true
 }
 
 function Update-VmProcessedProgress {
@@ -908,7 +1013,12 @@ function Invoke-VmDeletionQueue {
         while ($queue.Count -and $board.Count -lt $Parallel) {
             $target = $queue.Dequeue()
             # Revalidate only when a slot becomes available, not when the queue is built.
-            try { Assert-VmTarget $Client $target }
+            try {
+                $plan = Assert-VmTarget $Client $target
+                if ((Get-VmText $plan Method) -cnotin @('unregister', 'delete') -or -not @($plan.Steps).Count) {
+                    throw [VmInventoryException]::new('Validation produced no removal plan')
+                }
+            }
             catch {
                 $failure = Get-VmFailure $_.Exception
                 if ($failure -is [VmCheckFailedException]) {
@@ -923,24 +1033,24 @@ function Invoke-VmDeletionQueue {
             }
             $Statistics.Eligible++
             if (-not $Execute) {
-                Write-VmLog "DRY RUN: deployment $($target.DeploymentId) ($($target.Rows[0].deployment_name)) would be deleted; no delete submitted"
+                if ($plan.Method -ceq 'unregister') {
+                    Write-VmLog ("DRY RUN: deployment {0} ({1}): {2} VM(s) would be unregistered; nothing submitted" -f
+                        $target.DeploymentId, $target.Rows[0].deployment_name, @($plan.Steps).Count)
+                } else {
+                    Write-VmLog "DRY RUN: deployment $($target.DeploymentId) ($($target.Rows[0].deployment_name)) would be deleted; no delete submitted"
+                }
                 Update-VmProcessedProgress $Statistics $target $totalVms
                 continue
             }
-            $started = Get-VmMonotonicTime
-            try {
-                $requestId = Submit-VmDelete $Client $target
-                if (-not $requestIds.Add($requestId)) { throw [VmInventoryException]::new('Server returned a duplicate request ID') }
-            } catch {
-                $Statistics.Failures++
-                Write-VmLog ("FAILED submission for deployment {0}: {1}. Outcome may be uncertain; check the server before retrying. No automatic resubmission." -f
-                    $target.DeploymentId, (Get-VmFailure $_.Exception).Message) ERROR
+            $outstanding = [pscustomobject]@{
+                Target = $target; Plan = $plan; StepIndex = 0; Step = $plan.Steps[0]; RequestId = ''; Started = 0
+            }
+            if (-not (Start-VmPlanStep $Client $outstanding $requestIds $Statistics)) {
                 Update-VmProcessedProgress $Statistics $target $totalVms
                 continue
             }
             $Statistics.Submitted++
-            $board.Add([pscustomobject]@{ Target = $target; RequestId = $requestId; Started = $started })
-            Write-VmLog "SUBMITTED deployment $($target.DeploymentId) request $requestId"
+            $board.Add($outstanding)
         }
         foreach ($outstanding in $board.ToArray()) {
             $elapsed = (Get-VmMonotonicTime) - $outstanding.Started
@@ -959,15 +1069,35 @@ function Invoke-VmDeletionQueue {
                 continue
             }
             if ($outcome -cne 'pending') {
+                $target = $outstanding.Target
+                if ($outcome -ceq 'successful' -and $outstanding.Plan.Method -ceq 'unregister') {
+                    Write-VmLog "UNREGISTERED VM resource $($outstanding.Step.ResourceId) in deployment $($target.DeploymentId) request $($outstanding.RequestId)"
+                    if ($outstanding.StepIndex + 1 -lt @($outstanding.Plan.Steps).Count) {
+                        # Submit the next VM only after the previous request finished on this deployment.
+                        $outstanding.StepIndex++
+                        $outstanding.Step = $outstanding.Plan.Steps[$outstanding.StepIndex]
+                        if (Start-VmPlanStep $Client $outstanding $requestIds $Statistics) { continue }
+                        [void]$board.Remove($outstanding)
+                        Update-VmProcessedProgress $Statistics $target $totalVms
+                        continue
+                    }
+                }
                 [void]$board.Remove($outstanding)
                 if ($outcome -ceq 'successful') {
                     $Statistics.Successful++
-                    Write-VmLog "DELETED deployment $($outstanding.Target.DeploymentId) request $($outstanding.RequestId)"
+                    if ($outstanding.Plan.Method -ceq 'unregister') {
+                        $Statistics.Unregistered++
+                        Write-VmLog "COMPLETED unregister of all VMs in deployment $($target.DeploymentId)"
+                    } else {
+                        $Statistics.Deleted++
+                        Write-VmLog "DELETED deployment $($target.DeploymentId) request $($outstanding.RequestId)"
+                    }
                 } else {
                     $Statistics.Failures++
-                    Write-VmLog "FAILED deletion deployment $($outstanding.Target.DeploymentId) request $($outstanding.RequestId)" ERROR
+                    Write-VmLog ("FAILED {0} deployment {1} request {2}" -f
+                        $outstanding.Plan.Method, $target.DeploymentId, $outstanding.RequestId) ERROR
                 }
-                Update-VmProcessedProgress $Statistics $outstanding.Target $totalVms
+                Update-VmProcessedProgress $Statistics $target $totalVms
             }
         }
         if ($board.Count -and -not ($queue.Count -and $board.Count -lt $Parallel)) {
@@ -1044,8 +1174,9 @@ function Invoke-VmDeleteCommand {
             $stats.Failures++
             Write-VmLog ('FAILED: ' + (Get-VmFailure $_.Exception).Message) ERROR
         } finally {
-            Write-VmLog ("SUMMARY successful={0} failures={1} skipped={2} timed_out={3} eligible={4} submitted={5} processed={6}" -f
-                $stats.Successful, $stats.Failures, $stats.Skipped, $stats.TimedOut, $stats.Eligible, $stats.Submitted, $stats.Processed)
+            Write-VmLog ("SUMMARY successful={0} failures={1} skipped={2} timed_out={3} eligible={4} submitted={5} processed={6} unregistered={7} deleted={8}" -f
+                $stats.Successful, $stats.Failures, $stats.Skipped, $stats.TimedOut, $stats.Eligible, $stats.Submitted, $stats.Processed,
+                $stats.Unregistered, $stats.Deleted)
         }
         if ($completed) {
             $code = 0

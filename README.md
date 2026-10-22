@@ -413,6 +413,32 @@ monotonic timeouts, no-retry submission policy, deployment-disappearance
 confirmation and persistent statistics described below. All existing race,
 remote-timeout and visibility limitations also apply.
 
+**PowerShell removal method (Unregister first).** After the standard checks
+pass, the PowerShell script reads each VM resource's available day-2 actions
+(`GET /deployment/api/deployments/{id}/resources/{rid}/actions`):
+
+- If **every** VM in the deployment offers exactly one valid `Unregister`
+  action, the VMs are unregistered one at a time (one request in flight per
+  deployment). Each step is confirmed by the request completing with that
+  action and the VM resource disappearing from the deployment. Unregister only
+  removes Automation's record; nothing is sent to the provider. The deployment
+  itself is left in place, and so are any non-VM resources. If one step fails,
+  the remaining VMs of that deployment are not attempted.
+- Otherwise the script falls back to `Deployment.Delete`, but only if
+  **every** resource in the deployment, including disks, networks and other
+  non-VM resources, is freshly read and has `syncStatus` explicitly `MISSING`.
+  Any resource that is not Missing, has no status, or whose identity or type
+  changed causes the deployment to be skipped.
+
+The Unregister action ID is discovered by name rather than hard-coded. Before
+running with `-Execute`, check one onboarded VM's actions endpoint to confirm
+that it exposes `Unregister`. The dry run reports which method each deployment
+would use (`N VM(s) would be unregistered` or `would be deleted`). The log
+shows `SUBMITTED`, `UNREGISTERED` and `COMPLETED unregister` lines, and the
+summary includes `unregistered=` and `deleted=` counts. The Python deletion
+tool does not yet implement this; it always uses `Deployment.Delete` with the
+VM-only Missing check described below.
+
 Operational exit codes are the same: `0` success, `1` failure, `2` incomplete
 inventory or skipped-only deletion, and `130` for an interruption caught by the
 script. Native PowerShell parameter-binding errors use PowerShell's own exit

@@ -77,6 +77,7 @@ InModuleScope VmApps.Common {
             $script:Client = [pscustomobject]@{ PageSize = 100 }
             Set-TestResources
             Mock Write-VmLog {}
+            Mock Get-VmResourceActions { return ,@() }
             Mock Get-VmRecord {
                 param($Client, $Path, $Query)
                 $script:Calls.Add(@{ Path = $Path; Query = $Query })
@@ -369,10 +370,130 @@ InModuleScope VmApps.Common {
             { Assert-VmTarget $script:Client (New-TestTarget) } | Should Throw 'no longer connected'
         }
 
-        It 'accepts explicit zone ID without compute reference and non-VM resources' {
+        It 'accepts explicit zone ID without compute reference and Missing non-VM resources' {
             Set-TestResources @((New-TestVm -Properties @{ computeHostRef = ''; zoneId = 'zone-1' }),
-                @{ id = 'disk'; type = 'Cloud.vSphere.Disk' })
-            Assert-VmTarget $script:Client (New-TestTarget)
+                @{ id = 'disk'; type = 'Cloud.vSphere.Disk'; syncStatus = 'MISSING' })
+            (Assert-VmTarget $script:Client (New-TestTarget)).Method | Should Be delete
+        }
+
+        It 'refuses deployment delete unless every resource, including non-VMs, is Missing' {
+            foreach ($disk in @(@{ id = 'disk'; type = 'Cloud.vSphere.Disk'; syncStatus = 'SUCCESS' },
+                                @{ id = 'disk'; type = 'Cloud.vSphere.Disk' })) {
+                Set-TestResources @((New-TestVm), $disk)
+                { Assert-VmTarget $script:Client (New-TestTarget) } | Should Throw 'Resource disk (Cloud.vSphere.Disk) is not Missing'
+            }
+            Set-TestResources @((New-TestVm), @{ id = 'disk'; type = 'Cloud.vSphere.Disk'; syncStatus = 'MISSING' })
+            Set-TestReply ($script:ResourcePath + '/disk') @(@{ id = 'disk'; type = 'Cloud.Other'; syncStatus = 'MISSING' })
+            { Assert-VmTarget $script:Client (New-TestTarget) } | Should Throw 'identity/type changed'
+        }
+
+        It 'plans Unregister when every VM offers it, without requiring non-VM resources to be Missing' {
+            Mock Get-VmResourceActions {
+                return ,@([pscustomobject]@{ id = 'Deployment.Delete'; name = 'Delete' },
+                          [pscustomobject]@{ id = 'Cloud.vSphere.Machine.Unregister'; name = 'Unregister'; valid = $true })
+            }
+            Set-TestResources @((New-TestVm), (New-TestVm b), @{ id = 'net'; type = 'Cloud.vSphere.Network'; syncStatus = 'SUCCESS' })
+            $plan = Assert-VmTarget $script:Client (New-TestTarget -Rows @((New-TestRow), (New-TestRow b)))
+            $plan.Method | Should Be unregister
+            @($plan.Steps).Count | Should Be 2
+            $plan.Steps[0].ResourceId | Should Be a
+            $plan.Steps[1].ActionId | Should Be 'Cloud.vSphere.Machine.Unregister'
+            @($script:Calls | Where-Object { $_.Path -eq ($script:ResourcePath + '/net') }).Count | Should Be 0
+        }
+
+        It 'falls back to the guarded delete when any VM lacks a usable Unregister action' {
+            Mock Get-VmResourceActions {
+                param($Client, $DeploymentId, $ResourceId)
+                if ($ResourceId -ceq 'a') { return ,@([pscustomobject]@{ id = 'Cloud.vSphere.Machine.Unregister'; valid = $true }) }
+                return ,@([pscustomobject]@{ id = 'Cloud.vSphere.Machine.Unregister'; valid = $false })
+            }
+            Set-TestResources @((New-TestVm), (New-TestVm b))
+            (Assert-VmTarget $script:Client (New-TestTarget -Rows @((New-TestRow), (New-TestRow b)))).Method | Should Be delete
+            Set-TestResources @((New-TestVm), (New-TestVm b), @{ id = 'disk'; type = 'Cloud.vSphere.Disk'; syncStatus = 'SUCCESS' })
+            { Assert-VmTarget $script:Client (New-TestTarget -Rows @((New-TestRow), (New-TestRow b))) } | Should Throw 'delete refused'
+        }
+
+        It 'recognizes only one unambiguous, allowed Unregister action' {
+            (Get-VmUnregisterAction @([pscustomobject]@{ id = 'Cloud.vSphere.Machine.Unregister' })) | Should Be 'Cloud.vSphere.Machine.Unregister'
+            (Get-VmUnregisterAction @([pscustomobject]@{ id = 'X.unregister'; valid = $true })) | Should Be 'X.unregister'
+            (Get-VmUnregisterAction @([pscustomobject]@{ id = 'Custom.Op'; name = 'Unregister' })) | Should Be 'Custom.Op'
+            (Get-VmUnregisterAction @([pscustomobject]@{ id = 'A.Unregister'; valid = $false })) | Should Be ''
+            (Get-VmUnregisterAction @([pscustomobject]@{ id = 'A.Unregister' }, [pscustomobject]@{ id = 'B.Unregister' })) | Should Be ''
+            (Get-VmUnregisterAction @([pscustomobject]@{ id = 'Cloud.vSphere.Machine.UnregisterAndDelete' })) | Should Be ''
+            (Get-VmUnregisterAction @()) | Should Be ''
+        }
+
+        Context 'unregister submission' {
+            It 'submits Unregister as a resource action and verifies the VM resource disappears' {
+                Mock Invoke-VmRequest { return @{ Body = '{"id":"u1"}' } }
+                $step = [pscustomobject]@{ ResourceId = 'a'; ActionId = 'Cloud.vSphere.Machine.Unregister' }
+                (Submit-VmUnregister $script:Client (New-TestTarget) $step) | Should Be u1
+                Assert-MockCalled Invoke-VmRequest -Times 1 -Exactly -ParameterFilter {
+                    $Method -eq 'POST' -and $Path -eq '/deployment/api/deployments/dep-1/resources/a/requests' -and
+                    ($Body | ConvertFrom-Json).actionId -ceq 'Cloud.vSphere.Machine.Unregister'
+                }
+                $outstanding = [pscustomobject]@{ Target = New-TestTarget; RequestId = 'u1'; Step = $step; Started = 0 }
+                Set-TestReply '/deployment/api/requests/u1' @(
+                    @{ id = 'u1'; actionId = 'Cloud.vSphere.Machine.Unregister'; status = 'SUCCESSFUL' },
+                    @{ id = 'u1'; actionId = 'Cloud.vSphere.Machine.Unregister'; status = 'SUCCESSFUL' },
+                    @{ id = 'u1'; actionId = 'Deployment.Delete'; status = 'SUCCESSFUL' })
+                Set-TestReply ($script:ResourcePath + '/a') @((New-TestVm), [VmApiException]::new('GET', 'resource', 404))
+                (Get-VmDeletionOutcome $script:Client $outstanding) | Should Be pending
+                (Get-VmDeletionOutcome $script:Client $outstanding) | Should Be successful
+                { Get-VmDeletionOutcome $script:Client $outstanding } | Should Throw 'different action'
+            }
+        }
+
+        Context 'unregister scheduler' {
+            It 'unregisters VMs one at a time per deployment and never deletes the deployment' {
+                $steps = @([pscustomobject]@{ ResourceId = 'a'; ActionId = 'X.Unregister' },
+                           [pscustomobject]@{ ResourceId = 'b'; ActionId = 'X.Unregister' })
+                $script:Steps = $steps
+                Mock Assert-VmTarget { New-VmRemovalPlan unregister $script:Steps }
+                Mock Submit-VmDelete { throw 'must not delete' }
+                $script:InFlight = 0; $script:MaxInFlight = 0; $script:Submitted = @()
+                Mock Submit-VmUnregister {
+                    param($Client, $Target, $Step)
+                    $script:InFlight++
+                    $script:MaxInFlight = [Math]::Max($script:MaxInFlight, $script:InFlight)
+                    $script:Submitted += $Step.ResourceId
+                    return 'u-' + $Step.ResourceId
+                }
+                Mock Get-VmDeletionOutcome { $script:InFlight--; return 'successful' }
+                $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget -Rows @((New-TestRow), (New-TestRow b)))) -Execute
+                $script:Submitted -join ',' | Should Be 'a,b'
+                $script:MaxInFlight | Should Be 1
+                $stats.Successful | Should Be 1
+                $stats.Unregistered | Should Be 1
+                $stats.Deleted | Should Be 0
+                $stats.Processed | Should Be 2
+                Assert-MockCalled Submit-VmDelete -Times 0 -Exactly -Scope It
+            }
+
+            It 'stops a deployment after a failed unregister and reports dry runs per method' {
+                $steps = @([pscustomobject]@{ ResourceId = 'a'; ActionId = 'X.Unregister' },
+                           [pscustomobject]@{ ResourceId = 'b'; ActionId = 'X.Unregister' })
+                $script:Steps = $steps
+                Mock Assert-VmTarget { New-VmRemovalPlan unregister $script:Steps }
+                Mock Submit-VmUnregister { param($Client, $Target, $Step) return 'u-' + $Step.ResourceId }
+                Mock Get-VmDeletionOutcome { return 'failed' }
+                $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget)) -Execute
+                $stats.Failures | Should Be 1
+                $stats.Successful | Should Be 0
+                Assert-MockCalled Submit-VmUnregister -Times 1 -Exactly -Scope It
+                $null = Invoke-VmDeletionQueue $script:Client @((New-TestTarget))
+                Assert-MockCalled Write-VmLog -Times 1 -ParameterFilter { $Message -like '*2 VM(s) would be unregistered; nothing submitted*' }
+            }
+        }
+
+        Context 'missing removal plan' {
+            It 'rejects a missing removal plan instead of deleting' {
+                Mock Assert-VmTarget {}
+                Mock Submit-VmDelete { throw 'must not submit' }
+                $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget)) -Execute
+                $stats.Failures | Should Be 1
+                $stats.Submitted | Should Be 0
+            }
         }
 
         Context 'dry-run scheduler' {
@@ -392,7 +513,7 @@ InModuleScope VmApps.Common {
             It 'fills five slots, polls them and refills without threads' {
                 $script:Active = New-VmSet
                 $script:MaximumActive = 0
-                Mock Assert-VmTarget {}
+                Mock Assert-VmTarget { New-VmRemovalPlan }
                 Mock Submit-VmDelete {
                     param($Client, $Target)
                     [void]$script:Active.Add($Target.DeploymentId)
@@ -418,7 +539,7 @@ InModuleScope VmApps.Common {
                 $script:Clock = 0.0
                 Mock Get-VmMonotonicTime { return $script:Clock }
                 Mock Wait-VmPoll { param($Seconds) $script:Clock += $Seconds }
-                Mock Assert-VmTarget {}
+                Mock Assert-VmTarget { New-VmRemovalPlan }
                 Mock Submit-VmDelete { param($Client, $Target) return $Target.DeploymentId }
                 Mock Get-VmDeletionOutcome { throw [VmApiException]::new('GET', 'request', 404) }
                 $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget d1), (New-TestTarget d2)) `
@@ -438,6 +559,7 @@ InModuleScope VmApps.Common {
                     $script:CheckCount++
                     if ($script:CheckCount -eq 1) { throw [VmCheckFailedException]::new('not missing') }
                     if ($script:CheckCount -eq 2) { throw [VmInventoryException]::new('unreadable') }
+                    New-VmRemovalPlan
                 }
                 Mock Submit-VmDelete { throw [VmInventoryException]::new('connection lost') }
                 $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget d1), (New-TestTarget d2), (New-TestTarget d3)) -Execute
@@ -449,7 +571,7 @@ InModuleScope VmApps.Common {
 
         Context 'duplicate request IDs' {
             It 'counts terminal failures and guards against duplicate request IDs' {
-                Mock Assert-VmTarget {}
+                Mock Assert-VmTarget { New-VmRemovalPlan }
                 Mock Submit-VmDelete { return 'r' }
                 Mock Get-VmDeletionOutcome { return 'failed' }
                 $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget d1), (New-TestTarget d2)) -Execute
@@ -734,6 +856,7 @@ InModuleScope VmApps.Common {
                 Mock Assert-VmTarget {
                     param($Client, $Target)
                     if ($Client.Token -cne 'legacy-access') { throw 'Incorrect authentication' }
+                    New-VmRemovalPlan
                 }
                 Mock Submit-VmDelete { return 'r' }
                 Mock Get-VmDeletionOutcome { return 'successful' }
@@ -829,6 +952,25 @@ InModuleScope VmApps.Common {
 }
 
 InModuleScope VmApps.Common {
+    Describe 'Resource action discovery' {
+        It 'reads resource actions as a JSON array or content page' {
+            foreach ($body in @('[{"id":"A.Unregister"}]', '{"content":[{"id":"A.Unregister"}]}')) {
+                $script:Body = $body
+                Mock Invoke-VmRequest { return @{ Body = $script:Body } }
+                $actions = @(Get-VmResourceActions ([pscustomobject]@{}) dep-1 a)
+                $actions.Count | Should Be 1
+                $actions[0].id | Should Be 'A.Unregister'
+            }
+            Mock Invoke-VmRequest { return @{ Body = '[]' } }
+            @(Get-VmResourceActions ([pscustomobject]@{}) dep-1 a).Count | Should Be 0
+            Mock Invoke-VmRequest { return @{ Body = '<html>' } }
+            { Get-VmResourceActions ([pscustomobject]@{}) dep-1 a } | Should Throw 'invalid JSON'
+            Assert-MockCalled Invoke-VmRequest -ParameterFilter {
+                $Method -eq 'GET' -and $Path -eq '/deployment/api/deployments/dep-1/resources/a/actions'
+            }
+        }
+    }
+
     Describe 'Native request failure cleanup' {
         It 'restores a preexisting callback after a connection failure without leaking exception details' {
             $originalProgressPreference = $ProgressPreference
@@ -1032,7 +1174,7 @@ InModuleScope VmApps.Common {
         Context 'deletion CLI' {
             It 'defaults to dry run, persists summary and requires Execute to submit' {
                 Mock Read-VmTargets { return [pscustomobject]@{ DeploymentId = 'dep'; Rows = @(@{ deployment_name = 'App' }) } }
-                Mock Assert-VmTarget {}
+                Mock Assert-VmTarget { New-VmRemovalPlan }
                 Mock Submit-VmDelete { return 'r' }
                 Mock Get-VmDeletionOutcome { return 'successful' }
                 $log = Join-Path $TestDrive 'deletion.log'
