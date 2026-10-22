@@ -360,6 +360,18 @@ Bodies are now decoded explicitly, using the declared charset or UTF-8.
 Previously, byte bodies were turned into a string of numbers and reported as
 "invalid JSON response", and non-ASCII names were garbled.
 
+Responses are parsed with .NET's `JavaScriptSerializer` instead of
+`ConvertFrom-Json`. Aria records routinely contain keys that differ only in case,
+such as `hostname` and `hostName`. Windows PowerShell's `ConvertFrom-Json`
+rejects these as duplicate keys, which made otherwise valid records fail as
+"invalid JSON response". The scripts now keep such keys as distinct,
+case-sensitive values and read only the exact field name the API documents.
+If parsing still fails, the log line ends with the parser's reason, for example
+`- parser: Invalid JSON primitive: abc.` or
+`- parser: RecursionLimit exceeded. at character 512`. The parser's echo of
+the remaining response text is not logged. On PowerShell 7, which has no
+`JavaScriptSerializer`, `ConvertFrom-Json -AsHashtable` is used instead.
+
 ### Aria Automation 8.18 with PowerShell
 
 Both PowerShell scripts accept `-Legacy` for on-premises Aria Automation 8.18.

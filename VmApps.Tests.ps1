@@ -86,7 +86,8 @@ InModuleScope VmApps.Common {
                 }
                 $reply = $script:Replies[$Path].Dequeue()
                 if ($reply -is [Exception]) { throw $reply }
-                return $reply
+                # Round-trip through the production parser so logic sees real record shapes.
+                return ConvertFrom-VmJsonText (ConvertTo-Json -InputObject $reply -Depth 20 -Compress)
             }
         }
 
@@ -1190,7 +1191,8 @@ Describe 'PowerShell transport and native entry points' {
             $failure = $null
             try { Get-VmRecord $client '/deployment/api/deployments/d/resources' } catch { $failure = Get-VmFailure $_.Exception }
             $failure.Message | Should Match ('^/deployment/api/deployments/d/resources: invalid JSON response ' +
-                '\(HTTP 200, Content-Type text/html, \d+ chars\): \[HTML page ''Login''\] Login Session expired "access_token":\*\*\*$')
+                '\(HTTP 200, Content-Type text/html, \d+ chars\): \[HTML page ''Login''\] Login Session expired "access_token":\*\*\* ' +
+                '- parser: Invalid JSON primitive: .*$')
             $failure.Message | Should Not Match 'abc123'
         } finally { $server.Dispose() }
         $server = [VmApps.Tests.HttpServer]::new(200, '', $null, $null)
@@ -1199,8 +1201,44 @@ Describe 'PowerShell transport and native entry points' {
             { Get-VmRecord $client '/x' } | Should Throw '/x: expected a JSON object (HTTP 200, no Content-Type, empty body)'
         } finally { $server.Dispose() }
         $reply = [pscustomobject]@{ Body = 'not json token=xyz'; Status = 200; ContentType = 'text/plain'; Sensitive = $true }
-        { ConvertFrom-VmJson $reply.Body 'token exchange' $reply } |
-            Should Throw 'token exchange: invalid JSON response (HTTP 200, Content-Type text/plain, 18 chars)'
+        $failure = $null
+        try { ConvertFrom-VmJson $reply.Body 'token exchange' $reply } catch { $failure = $_.Exception.Message }
+        $failure | Should Be 'token exchange: invalid JSON response (HTTP 200, Content-Type text/plain, 18 chars)'
+    }
+    It 'keeps keys that differ only in case as distinct, case-sensitive values' {
+        $body = '{"id":"vm-1","hostname":"lower","hostName":"camel","customProperties":{"Name":"a","name":"b","":"empty"},' +
+            '"content":[{"id":"x","ID":"y"}]}'
+        $server = [VmApps.Tests.HttpServer]::new(200, $body, $null, 'application/hal+json')
+        try {
+            $client = [pscustomobject]@{ Base = $server.Url.TrimEnd('/'); ApiVersion = ''; Token = ''; Timeout = 5 }
+            $record = Get-VmRecord $client '/iaas/api/machines/vm-1'
+        } finally { $server.Dispose() }
+        Get-VmText $record hostname | Should BeExactly 'lower'
+        Get-VmText $record hostName | Should BeExactly 'camel'
+        Get-VmValue $record HOSTNAME | Should Be $null
+        $properties = Get-VmProperties $record customProperties
+        Get-VmText $properties Name | Should BeExactly 'a'
+        Get-VmText $properties name | Should BeExactly 'b'
+        Get-VmText $properties '' | Should BeExactly 'empty'
+        $content = Get-VmValue $record content
+        ($content -is [array]) | Should Be $true
+        Get-VmText $content[0] ID | Should BeExactly 'y'
+    }
+    It 'parses top-level arrays, large bodies and deep nesting, and reports parser positions without input' {
+        $items = ConvertFrom-VmJsonText '[{"id":"a"},{"id":"b"}]'
+        ($items -is [array]) | Should Be $true
+        $items.Count | Should Be 2
+        $single = ConvertFrom-VmJsonText '[{"id":"a"}]'
+        ($single -is [array]) | Should Be $true
+        $single.Count | Should Be 1
+        $large = ConvertFrom-VmJsonText ('{"s":"' + ('x' * 3MB) + '"}')
+        (Get-VmText $large s).Length | Should Be (3MB)
+        $deep = ConvertFrom-VmJsonText (('{"a":' * 150) + '1' + ('}' * 150))
+        ($deep -is [System.Collections.IDictionary]) | Should Be $true
+        $failure = $null
+        try { ConvertFrom-VmJson ('{"a":' * 300 + '"secret-tail"' + '}' * 300) 'deep' } catch { $failure = $_.Exception.Message }
+        $failure | Should Match '^deep: invalid JSON response - parser: RecursionLimit exceeded\. at character \d+$'
+        $failure | Should Not Match 'secret-tail'
     }
     It 'refuses absolute or scheme-relative API paths before any network request' {
         { Invoke-VmRequest $null GET 'https://elsewhere/test' } | Should Throw 'relative'

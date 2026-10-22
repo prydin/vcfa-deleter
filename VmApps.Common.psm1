@@ -30,6 +30,7 @@ $script:VmColumns = @(
     'deployment_id', 'cloudzone', 'cloudzone_id', 'powerStatus'
 )
 $script:VmLog = $null
+$script:VmJsonSerializer = $null
 
 function Write-VmLog {
     param([string]$Message, [string]$Level = 'INFO')
@@ -237,8 +238,8 @@ function Get-VmErrorDetail {
     param([string]$Text, [switch]$Sensitive)
     if (-not $Text -or -not $Text.Trim()) { return '' }
     $record = $null
-    try { $record = ConvertFrom-Json -InputObject $Text -ErrorAction Stop } catch { }
-    if ($record -is [System.Management.Automation.PSCustomObject]) {
+    try { $record = ConvertFrom-VmJsonText $Text } catch { }
+    if ($record -is [System.Collections.IDictionary]) {
         $message = ''
         foreach ($key in @('message', 'serverMessage', 'error_description', 'error', 'detail')) {
             $value = Get-VmValue $record $key
@@ -378,10 +379,44 @@ function Get-VmReplySummary {
     return $summary
 }
 
+function ConvertFrom-VmJsonText {
+    # Aria records routinely carry keys differing only in case (e.g. "hostname" and
+    # "hostName"), which ConvertFrom-Json rejects. JavaScriptSerializer keeps them as
+    # distinct keys of a case-sensitive Dictionary; arrays come back as object[].
+    param([string]$Text)
+    if ($null -eq $script:VmJsonSerializer) {
+        if ($PSVersionTable.PSVersion.Major -ge 6) {
+            return ,(ConvertFrom-Json -InputObject $Text -AsHashtable -NoEnumerate -Depth 256 -ErrorAction Stop)
+        }
+        Add-Type -AssemblyName System.Web.Extensions
+        $serializer = [System.Web.Script.Serialization.JavaScriptSerializer]::new()
+        $serializer.MaxJsonLength = [int]::MaxValue
+        $serializer.RecursionLimit = 256
+        $script:VmJsonSerializer = $serializer
+    }
+    return ,$script:VmJsonSerializer.DeserializeObject($Text)
+}
+
+function Get-VmJsonError {
+    param($ErrorRecord, $Reply)
+    if (Get-VmValue $Reply Sensitive) { return '' }
+    $exception = $ErrorRecord.Exception
+    while ($exception -is [System.Management.Automation.MethodInvocationException] -and $exception.InnerException) {
+        $exception = $exception.InnerException
+    }
+    $message = [string]$exception.Message
+    # JavaScriptSerializer appends "(position): <rest of the input>"; keep only the position.
+    if ($message -match '(?s)^(.*?)\s*\((\d+)\):') { $message = "$($Matches[1]) at character $($Matches[2])" }
+    return ' - parser: ' + (Get-VmBodyExcerpt $message 200)
+}
+
 function ConvertFrom-VmJson {
     param([string]$Body, [string]$Context, $Reply)
-    try { $record = ConvertFrom-Json -InputObject $Body -ErrorAction Stop }
-    catch { throw [VmInventoryException]::new("${Context}: invalid JSON response" + (Get-VmReplySummary $Reply $Body)) }
+    try { $record = ConvertFrom-VmJsonText $Body }
+    catch {
+        throw [VmInventoryException]::new("${Context}: invalid JSON response" + (Get-VmReplySummary $Reply $Body) +
+            (Get-VmJsonError $_ $Reply))
+    }
     if (-not $Body.TrimStart().StartsWith('{')) {
         throw [VmInventoryException]::new("${Context}: expected a JSON object" + (Get-VmReplySummary $Reply $Body))
     }
@@ -1076,10 +1111,11 @@ function Get-VmResourceActions {
         $items = Get-VmValue (ConvertFrom-VmJson $body $path $reply) content
         if ($items -isnot [array]) { throw [VmInventoryException]::new("${path}: expected a content array") }
     } elseif ($trimmed.StartsWith('[')) {
-        try { $parsed = ConvertFrom-Json -InputObject $body -ErrorAction Stop }
-        catch { throw [VmInventoryException]::new("${path}: invalid JSON response" + (Get-VmReplySummary $reply $body)) }
-        # Windows PowerShell emits a top-level JSON array as one object; unroll it.
-        $items = @(foreach ($item in $parsed) { $item })
+        try { $items = ConvertFrom-VmJsonText $body }
+        catch {
+            throw [VmInventoryException]::new("${path}: invalid JSON response" + (Get-VmReplySummary $reply $body) +
+                (Get-VmJsonError $_ $reply))
+        }
     } else {
         throw [VmInventoryException]::new("${path}: invalid JSON response" + (Get-VmReplySummary $reply $body))
     }
