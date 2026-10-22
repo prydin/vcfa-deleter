@@ -15,8 +15,9 @@ namespace VmApps.Tests {
         private readonly Task worker;
         public string Url { get; private set; }
         public string Request { get; private set; }
-        public HttpServer(int status, string body) : this(status, body, null) {}
-        public HttpServer(int status, string body, X509Certificate2 certificate) {
+        public HttpServer(int status, string body) : this(status, body, null, "application/json") {}
+        public HttpServer(int status, string body, X509Certificate2 certificate) : this(status, body, certificate, "application/json") {}
+        public HttpServer(int status, string body, X509Certificate2 certificate, string contentType) {
             listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
             Url = (certificate == null ? "http://127.0.0.1:" : "https://localhost:") +
@@ -63,7 +64,8 @@ namespace VmApps.Tests {
                         }
                         Request = headers + Encoding.UTF8.GetString(payload);
                         byte[] bytes = Encoding.UTF8.GetBytes(body);
-                        string response = "HTTP/1.1 " + status + " Test\r\nContent-Type: application/json\r\n" +
+                        string response = "HTTP/1.1 " + status + " Test\r\n" +
+                            (contentType == null ? "" : "Content-Type: " + contentType + "\r\n") +
                             "Content-Length: " + bytes.Length + "\r\nConnection: close\r\n";
                         if (status == 302) response += "Location: " + Url + "redirected\r\n";
                         byte[] responseHeader = Encoding.ASCII.GetBytes(response + "\r\n");

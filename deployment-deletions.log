@@ -50,3 +50,29 @@
 2026-10-21 09:54:32,492 INFO: SUBMITTED deployment 6ab9b4b8-e279-4f2f-8b02-b78ca9ff7b62 request 794e4a60-8eaf-43fb-bfd4-9f1854c2f10f
 2026-10-21 09:54:42,682 INFO: DELETED deployment 6ab9b4b8-e279-4f2f-8b02-b78ca9ff7b62 request 794e4a60-8eaf-43fb-bfd4-9f1854c2f10f
 2026-10-21 09:54:42,682 INFO: SUMMARY successful=1 failures=0 skipped=0 timed_out=0 eligible=1 submitted=1
+2026-10-22 11:22:21 INFO: Loaded 3 deployments; mode=DRY RUN, slots=5
+2026-10-22 11:22:21 WARNING: TLS certificate verification is disabled by Insecure. Server identity is not verified. On Windows PowerShell 5.1, this affects all HTTPS work in this process until the command exits; use a dedicated process on a trusted network.
+2026-10-22 11:22:21 ERROR: FAILED: Use Org or an organization-qualified username
+2026-10-22 11:22:21 INFO: SUMMARY successful=0 failures=1 skipped=0 timed_out=0 eligible=0 submitted=0 processed=0 unregistered=0 deleted=0
+2026-10-22 11:22:46 INFO: Loaded 3 deployments; mode=DRY RUN, slots=5
+2026-10-22 11:22:46 WARNING: TLS certificate verification is disabled by Insecure. Server identity is not verified. On Windows PowerShell 5.1, this affects all HTTPS work in this process until the command exits; use a dedicated process on a trusted network.
+2026-10-22 11:22:46 ERROR: FAILED: POST /csp/gateway/am/api/login: HTTP 404
+2026-10-22 11:22:46 INFO: SUMMARY successful=0 failures=1 skipped=0 timed_out=0 eligible=0 submitted=0 processed=0 unregistered=0 deleted=0
+2026-10-22 11:23:12 INFO: Loaded 3 deployments; mode=DRY RUN, slots=5
+2026-10-22 11:23:12 WARNING: TLS certificate verification is disabled by Insecure. Server identity is not verified. On Windows PowerShell 5.1, this affects all HTTPS work in this process until the command exits; use a dedicated process on a trusted network.
+2026-10-22 11:23:13 INFO: DRY RUN: deployment d6d8cb56-4031-4975-be2a-c00c9c0e8c6c (Dummy site 1): 1 VM(s) would be unregistered; nothing submitted
+2026-10-22 11:23:13 INFO: DRY RUN: deployment aed2a91e-7771-4308-b8f4-37ec03548a86 (5 VMs[3]): 1 VM(s) would be unregistered; nothing submitted
+2026-10-22 11:23:14 INFO: DRY RUN: deployment f707104d-482e-4e1c-901f-204d5c2d80ca (5 VMs[1]): 1 VM(s) would be unregistered; nothing submitted
+2026-10-22 11:23:14 INFO: SUMMARY successful=0 failures=0 skipped=0 timed_out=0 eligible=3 submitted=0 processed=3 unregistered=0 deleted=0
+2026-10-22 11:23:37 INFO: Loaded 3 deployments; mode=EXECUTE, slots=5
+2026-10-22 11:23:37 WARNING: TLS certificate verification is disabled by Insecure. Server identity is not verified. On Windows PowerShell 5.1, this affects all HTTPS work in this process until the command exits; use a dedicated process on a trusted network.
+2026-10-22 11:23:38 INFO: SUBMITTED unregister (Cloud.vSphere.Machine.Unregister) of VM resource cce7dc13-2d0b-4736-813e-3bde36653472 in deployment d6d8cb56-4031-4975-be2a-c00c9c0e8c6c request 8d53eba0-686f-4a6a-ad7d-857db89d679e
+2026-10-22 11:23:38 INFO: SUBMITTED unregister (Cloud.vSphere.Machine.Unregister) of VM resource a65c7301-6e2d-4ff4-8d0d-fd8062c7eb4b in deployment aed2a91e-7771-4308-b8f4-37ec03548a86 request e4ba11b2-2fcf-4dfd-a97f-89b3ccd2a248
+2026-10-22 11:23:39 INFO: SUBMITTED unregister (Cloud.vSphere.Machine.Unregister) of VM resource 4c75a85a-9b46-4bf7-b5dd-03b25e89c648 in deployment f707104d-482e-4e1c-901f-204d5c2d80ca request f87f2662-d7b9-4c3d-a867-773884dd6820
+2026-10-22 11:24:19 INFO: UNREGISTERED VM resource cce7dc13-2d0b-4736-813e-3bde36653472 in deployment d6d8cb56-4031-4975-be2a-c00c9c0e8c6c request 8d53eba0-686f-4a6a-ad7d-857db89d679e
+2026-10-22 11:24:19 INFO: COMPLETED unregister of all VMs in deployment d6d8cb56-4031-4975-be2a-c00c9c0e8c6c
+2026-10-22 11:24:19 INFO: UNREGISTERED VM resource a65c7301-6e2d-4ff4-8d0d-fd8062c7eb4b in deployment aed2a91e-7771-4308-b8f4-37ec03548a86 request e4ba11b2-2fcf-4dfd-a97f-89b3ccd2a248
+2026-10-22 11:24:19 INFO: COMPLETED unregister of all VMs in deployment aed2a91e-7771-4308-b8f4-37ec03548a86
+2026-10-22 11:24:19 INFO: UNREGISTERED VM resource 4c75a85a-9b46-4bf7-b5dd-03b25e89c648 in deployment f707104d-482e-4e1c-901f-204d5c2d80ca request f87f2662-d7b9-4c3d-a867-773884dd6820
+2026-10-22 11:24:19 INFO: COMPLETED unregister of all VMs in deployment f707104d-482e-4e1c-901f-204d5c2d80ca
+2026-10-22 11:24:19 INFO: SUMMARY successful=3 failures=0 skipped=0 timed_out=0 eligible=3 submitted=3 processed=3 unregistered=3 deleted=0

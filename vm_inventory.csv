@@ -1,1 +1,4 @@
 ﻿"vm_name","deployment_name","status","vm_id","resource_id","deployment_id","cloudzone","cloudzone_id","powerStatus"
+"aria-vm-000009","Dummy site 1","missing","cce7dc13-2d0b-4736-813e-3bde36653472","cce7dc13-2d0b-4736-813e-3bde36653472","d6d8cb56-4031-4975-be2a-c00c9c0e8c6c","vc-01 / vcf-lab-dc-01","51af8f1b-10ba-4b9f-baa5-a1a8cfdbe38e","ON"
+"aria-vm-000008","5 VMs[3]","missing","a65c7301-6e2d-4ff4-8d0d-fd8062c7eb4b","a65c7301-6e2d-4ff4-8d0d-fd8062c7eb4b","aed2a91e-7771-4308-b8f4-37ec03548a86","vc-01 / vcf-lab-dc-01","51af8f1b-10ba-4b9f-baa5-a1a8cfdbe38e","ON"
+"aria-vm-000007","5 VMs[1]","missing","4c75a85a-9b46-4bf7-b5dd-03b25e89c648","4c75a85a-9b46-4bf7-b5dd-03b25e89c648","f707104d-482e-4e1c-901f-204d5c2d80ca","vc-01 / vcf-lab-dc-01","51af8f1b-10ba-4b9f-baa5-a1a8cfdbe38e","ON"

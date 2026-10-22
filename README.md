@@ -280,11 +280,18 @@ $env:VCFA_API_TOKEN = '<organization-api-token>'
 .\vm_apps_inventory.ps1 -Server vcfa.example.com -Org MyOrganization -CloudZone "Production" -Output .\production-vms.csv
 .\vm_apps_inventory.ps1 -Server vcfa.example.com -Org MyOrganization -CloudZone "Production" -Output .\all-vms.csv -All
 
-# Validate and report what would be deleted, without submitting deletes.
+# Validate and report what would be unregistered, without submitting anything.
 .\vm_apps_delete.ps1 -Server vcfa.example.com -Org MyOrganization -InputCsv .\production-vms.csv
 
-# Destructive: delete eligible deployments and wait for completion.
+# Unregister eligible VMs and wait for completion (unregister-only by default).
 .\vm_apps_delete.ps1 -Server vcfa.example.com -Org MyOrganization -InputCsv .\production-vms.csv -Execute -Parallel 5 -PollInterval 5 -RequestTimeout 300
+
+# Destructive: also delete deployments whose VMs cannot be unregistered.
+.\vm_apps_delete.ps1 -Server vcfa.example.com -Org MyOrganization -InputCsv .\production-vms.csv -Execute -AllowDelete
+
+# VERY DANGEROUS: also accept VMs that are not Missing, e.g. after their vCenter
+# was decommissioned. Prompts for a confirmation phrase; see below.
+.\vm_apps_delete.ps1 -Server vcfa.example.com -Org MyOrganization -InputCsv .\production-vms.csv -DeleteNonMissingVMs
 ```
 
 `-Host` is an alias for `-Server`, and `-Input` is an alias for `-InputCsv`.
@@ -325,6 +332,33 @@ HTTP status, and elapsed time to stderr (and the deletion log file), for example
 `DEBUG: GET /deployment/api/deployments?page=0&size=100 -> 200 in 412 ms`.
 Request bodies, tokens, and credential query values are never logged, and
 `-Debug` does not trigger PowerShell's interactive debug prompts.
+
+### API error details
+
+PowerShell errors include whatever the server reported, so a failed call can be
+diagnosed from the log alone:
+
+```text
+ERROR: GET /deployment/api/deployments/<id>/resources: HTTP 403 (Forbidden): User is not authorized [errorCode 10010]
+ERROR: GET /deployment/api/deployments/<id>/resources: HTTP 502 (Bad Gateway): non-JSON body, 1534 chars
+ERROR: /deployment/api/deployments/<id>/resources: invalid JSON response (HTTP 200, Content-Type text/html, 1534 chars): [HTML page 'Login'] ...
+```
+
+- **HTTP errors** show the status code, the reason phrase, and the server's
+  structured message and `errorCode` when the body is JSON. A non-JSON error
+  body, such as a proxy page, is reported only by its length.
+- **"invalid JSON response"** means the call succeeded (2xx) but the body could
+  not be parsed. The message adds the status, Content-Type, body length, and a
+  300-character excerpt. For HTML, the excerpt is prefixed with the page title.
+- Token, password, and `client_secret` values in excerpts are replaced by `***`.
+  Responses from authentication endpoints are never excerpted.
+
+Windows PowerShell 5.1 returns response bodies as raw bytes when the
+Content-Type is not exactly `application/json`, for example `application/hal+json`
+or a missing header. It also decodes JSON without a charset as Latin-1.
+Bodies are now decoded explicitly, using the declared charset or UTF-8.
+Previously, byte bodies were turned into a string of numbers and reported as
+"invalid JSON response", and non-ASCII names were garbled.
 
 ### Aria Automation 8.18 with PowerShell
 
@@ -413,9 +447,9 @@ monotonic timeouts, no-retry submission policy, deployment-disappearance
 confirmation and persistent statistics described below. All existing race,
 remote-timeout and visibility limitations also apply.
 
-**PowerShell removal method (Unregister first).** After the standard checks
-pass, the PowerShell script reads each VM resource's available day-2 actions
-(`GET /deployment/api/deployments/{id}/resources/{rid}/actions`):
+**PowerShell removal method (unregister-only by default).** After the standard
+checks pass, the PowerShell script reads each VM resource's available day-2
+actions (`GET /deployment/api/deployments/{id}/resources/{rid}/actions`):
 
 - If **every** VM in the deployment offers exactly one valid `Unregister`
   action, the VMs are unregistered one at a time (one request in flight per
@@ -424,20 +458,62 @@ pass, the PowerShell script reads each VM resource's available day-2 actions
   removes Automation's record; nothing is sent to the provider. The deployment
   itself is left in place, and so are any non-VM resources. If one step fails,
   the remaining VMs of that deployment are not attempted.
-- Otherwise the script falls back to `Deployment.Delete`, but only if
-  **every** resource in the deployment, including disks, networks and other
-  non-VM resources, is freshly read and has `syncStatus` explicitly `MISSING`.
-  Any resource that is not Missing, has no status, or whose identity or type
-  changed causes the deployment to be skipped.
+- Otherwise the deployment is **skipped** (`Unregister is not available;
+  deployment delete requires -AllowDelete`). The script never submits
+  `Deployment.Delete` unless `-AllowDelete` is given.
+- With `-AllowDelete`, such deployments fall back to `Deployment.Delete`, but
+  only if **every** resource in the deployment, including disks, networks and
+  other non-VM resources, is freshly read and has `syncStatus` explicitly
+  `MISSING`. Any resource that is not Missing, has no status, or whose identity
+  or type changed causes the deployment to be skipped.
 
-The Unregister action ID is discovered by name rather than hard-coded. Before
-running with `-Execute`, check one onboarded VM's actions endpoint to confirm
-that it exposes `Unregister`. The dry run reports which method each deployment
-would use (`N VM(s) would be unregistered` or `would be deleted`). The log
-shows `SUBMITTED`, `UNREGISTERED` and `COMPLETED unregister` lines, and the
-summary includes `unregistered=` and `deleted=` counts. The Python deletion
-tool does not yet implement this; it always uses `Deployment.Delete` with the
-VM-only Missing check described below.
+The log's `Loaded` line shows `removal=unregister-only` or
+`removal=unregister, delete allowed`. The Unregister action ID is discovered by
+name rather than hard-coded. Before running with `-Execute`, check one onboarded
+VM's actions endpoint to confirm that it exposes `Unregister`. The dry run
+reports which method each deployment would use (`N VM(s) would be unregistered`
+or, with `-AllowDelete`, `would be deleted`). The log shows `SUBMITTED`,
+`UNREGISTERED` and `COMPLETED unregister` lines, and the summary includes
+`unregistered=` and `deleted=` counts. The Python deletion tool does not yet
+implement this; it always uses `Deployment.Delete` with the VM-only Missing
+check described below.
+
+**Removing VMs that are not Missing (`-DeleteNonMissingVMs`, very dangerous).**
+When a vCenter is decommissioned, Automation can lose its VMs permanently
+without ever marking them `MISSING`. `-DeleteNonMissingVMs` relaxes the Missing
+requirement for that case only, and adds these checks:
+
+- After the CSV is validated and before authenticating, the script prints a
+  warning and requires the operator to type exactly
+  `Yes I am absolutely sure I want this` (case-sensitive; surrounding spaces
+  are ignored). Any other answer, or a non-interactive session, aborts the run
+  with exit code `1`. The prompt is also shown for dry runs.
+- Every VM (and, with `-AllowDelete`, every non-VM resource) that is not Missing
+  must record a cloud account (`properties.endpointId`) equal to the
+  `cloudAccountId` of the CSV cloud zone's region. All other checks, including
+  the cloud-zone and compute membership checks, still apply.
+- The first time a cloud account is needed in a run, the script triggers a
+  fresh health check (`POST /iaas/api/cloud-accounts/{id}/health-check`) and
+  waits for the request tracker to finish, up to `-RequestTimeout`. If the
+  check cannot be started or does not finish, every deployment using that
+  account is skipped.
+- For each deployment, the script then reads the cloud account again. It must
+  be of type `vsphere` and report `healthy` as the JSON boolean `false`. A
+  healthy account, a missing or non-boolean `healthy` field, or another account
+  type causes the deployment to be skipped.
+- Each accepted non-Missing resource is logged as a `WARNING`, and the `Loaded`
+  line shows `NON-MISSING VMs allowed`.
+
+The cloud-account check runs only with `-DeleteNonMissingVMs`, and only for
+resources that are not Missing. Without the flag, no health check is made and
+non-Missing VMs are always skipped.
+
+`healthy=false` means Automation cannot use the account. That can be lost
+connectivity or invalid credentials, so confirm the vCenter really is gone
+before using this option. The health-check endpoint has not been validated
+against a live 8.18 server; if it is not available, the deployments are skipped.
+Prefer Unregister: a `Deployment.Delete` against an unreachable vCenter may fail
+or need Automation's own forced-removal handling.
 
 Operational exit codes are the same: `0` success, `1` failure, `2` incomplete
 inventory or skipped-only deletion, and `130` for an interruption caught by the

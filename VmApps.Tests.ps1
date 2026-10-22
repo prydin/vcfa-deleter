@@ -220,8 +220,8 @@ InModuleScope VmApps.Common {
                     name = 'vcf-lab-dc-01'; externalRegionId = 'dc-1'; cloudAccountId = 'account-1'
                 })
                 if ($overrides.Count) {
-                    { Assert-VmTarget $script:Client (New-TestTarget) } | Should Throw 'no longer connected'
-                } else { Assert-VmTarget $script:Client (New-TestTarget) }
+                    { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete } | Should Throw 'no longer connected'
+                } else { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete }
             }
         }
 
@@ -313,7 +313,7 @@ InModuleScope VmApps.Common {
             [IO.File]::WriteAllText($path, ((ConvertTo-VmCsvLine $columns) + "`n" + (ConvertTo-VmCsvLine $values)))
             $target = @(Read-VmTargets $path)[0]
             $target.Rows[0].powerStatus | Should Be unknown
-            Assert-VmTarget $script:Client $target
+            Assert-VmTarget $script:Client $target -AllowDelete
             $row.powerStatus = ''
             Write-VmCsv $path @($row)
             @(Read-VmTargets $path)[0].Rows[0].powerStatus | Should Be unknown
@@ -340,22 +340,22 @@ InModuleScope VmApps.Common {
             $row = New-TestRow
             $row.status = 'SUCCESS'
             $row.powerStatus = 'ON'
-            Assert-VmTarget $script:Client (New-TestTarget -Rows @($row))
+            Assert-VmTarget $script:Client (New-TestTarget -Rows @($row)) -AllowDelete
             @($script:Calls | Where-Object { $_.Path -eq $script:ResourcePath }).Count | Should Be 2
             Set-TestResources @((New-TestVm), (New-TestVm b -Status SUCCESS -Properties @{ powerState = 'OFF' }))
-            { Assert-VmTarget $script:Client (New-TestTarget -Rows @((New-TestRow), (New-TestRow b))) } | Should Throw 'syncStatus is not Missing'
+            { Assert-VmTarget $script:Client (New-TestTarget -Rows @((New-TestRow), (New-TestRow b))) -AllowDelete } | Should Throw 'syncStatus is not Missing'
         }
 
         It 'rejects extra, absent, empty and changed deployment resource sets' {
             Set-TestResources @((New-TestVm), (New-TestVm b))
-            { Assert-VmTarget $script:Client (New-TestTarget) } | Should Throw 'VM set differs'
+            { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete } | Should Throw 'VM set differs'
             Set-TestResources @()
-            { Assert-VmTarget $script:Client (New-TestTarget) } | Should Throw 'VM set differs'
+            { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete } | Should Throw 'VM set differs'
             Set-TestResources
             Set-TestReply $script:ResourcePath @(
                 @{ content = @((New-TestVm)); last = $true },
                 @{ content = @((New-TestVm), @{ id = 'disk'; type = 'Cloud.vSphere.Disk' }); last = $true })
-            { Assert-VmTarget $script:Client (New-TestTarget) } | Should Throw 'changed during validation'
+            { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete } | Should Throw 'changed during validation'
         }
 
         It 'fails closed for missing syncStatus, name-only zones and conflicting compute evidence' {
@@ -363,28 +363,28 @@ InModuleScope VmApps.Common {
             $resource.PSObject.Properties.Remove('syncStatus')
             $resource | Add-Member NoteProperty state MISSING
             Set-TestResources @($resource)
-            { Assert-VmTarget $script:Client (New-TestTarget) } | Should Throw 'syncStatus is not Missing'
+            { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete } | Should Throw 'syncStatus is not Missing'
             Set-TestResources @((New-TestVm -Properties @{ computeHostRef = ''; zone = 'Production' }))
-            { Assert-VmTarget $script:Client (New-TestTarget) } | Should Throw 'cannot be verified'
+            { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete } | Should Throw 'cannot be verified'
             Set-TestResources @((New-TestVm -Properties @{ zoneId = 'zone-1'; endpointId = 'other' }))
-            { Assert-VmTarget $script:Client (New-TestTarget) } | Should Throw 'no longer connected'
+            { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete } | Should Throw 'no longer connected'
         }
 
         It 'accepts explicit zone ID without compute reference and Missing non-VM resources' {
             Set-TestResources @((New-TestVm -Properties @{ computeHostRef = ''; zoneId = 'zone-1' }),
                 @{ id = 'disk'; type = 'Cloud.vSphere.Disk'; syncStatus = 'MISSING' })
-            (Assert-VmTarget $script:Client (New-TestTarget)).Method | Should Be delete
+            (Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete).Method | Should Be delete
         }
 
         It 'refuses deployment delete unless every resource, including non-VMs, is Missing' {
             foreach ($disk in @(@{ id = 'disk'; type = 'Cloud.vSphere.Disk'; syncStatus = 'SUCCESS' },
                                 @{ id = 'disk'; type = 'Cloud.vSphere.Disk' })) {
                 Set-TestResources @((New-TestVm), $disk)
-                { Assert-VmTarget $script:Client (New-TestTarget) } | Should Throw 'Resource disk (Cloud.vSphere.Disk) is not Missing'
+                { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete } | Should Throw 'Resource disk (Cloud.vSphere.Disk) is not Missing'
             }
             Set-TestResources @((New-TestVm), @{ id = 'disk'; type = 'Cloud.vSphere.Disk'; syncStatus = 'MISSING' })
             Set-TestReply ($script:ResourcePath + '/disk') @(@{ id = 'disk'; type = 'Cloud.Other'; syncStatus = 'MISSING' })
-            { Assert-VmTarget $script:Client (New-TestTarget) } | Should Throw 'identity/type changed'
+            { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete } | Should Throw 'identity/type changed'
         }
 
         It 'plans Unregister when every VM offers it, without requiring non-VM resources to be Missing' {
@@ -408,9 +408,96 @@ InModuleScope VmApps.Common {
                 return ,@([pscustomobject]@{ id = 'Cloud.vSphere.Machine.Unregister'; valid = $false })
             }
             Set-TestResources @((New-TestVm), (New-TestVm b))
-            (Assert-VmTarget $script:Client (New-TestTarget -Rows @((New-TestRow), (New-TestRow b)))).Method | Should Be delete
+            (Assert-VmTarget $script:Client (New-TestTarget -Rows @((New-TestRow), (New-TestRow b))) -AllowDelete).Method | Should Be delete
             Set-TestResources @((New-TestVm), (New-TestVm b), @{ id = 'disk'; type = 'Cloud.vSphere.Disk'; syncStatus = 'SUCCESS' })
-            { Assert-VmTarget $script:Client (New-TestTarget -Rows @((New-TestRow), (New-TestRow b))) } | Should Throw 'delete refused'
+            { Assert-VmTarget $script:Client (New-TestTarget -Rows @((New-TestRow), (New-TestRow b))) -AllowDelete } | Should Throw 'delete refused'
+        }
+
+        It 'skips deployments without Unregister unless -AllowDelete is given' {
+            Set-TestResources @((New-TestVm), @{ id = 'disk'; type = 'Cloud.vSphere.Disk'; syncStatus = 'MISSING' })
+            { Assert-VmTarget $script:Client (New-TestTarget) } |
+                Should Throw 'VM resource a: Unregister is not available; deployment delete requires -AllowDelete'
+            @($script:Calls | Where-Object { $_.Path -eq ($script:ResourcePath + '/disk') }).Count | Should Be 0
+        }
+
+        Context 'non-Missing removal (DeleteNonMissingVMs)' {
+            BeforeEach {
+                $script:TrackerBody = '{"id":"t1","status":"FINISHED","message":"done"}'
+                Mock Invoke-VmRequest { return @{ Body = $script:TrackerBody } }
+                $script:Now = 0.0
+                Mock Get-VmMonotonicTime { return $script:Now }
+                Mock Wait-VmPoll { param($Seconds) $script:Now += $Seconds }
+            }
+            function Set-TestAccount {
+                param([hashtable]$Account = @{ id = 'account-1'; name = 'vc-old'; cloudAccountType = 'vsphere'; healthy = $false },
+                      [int]$Count = 4)
+                Set-TestReply '/iaas/api/cloud-accounts/account-1' @(1..$Count | ForEach-Object { [pscustomobject]$Account })
+            }
+
+            It 'still refuses non-Missing VMs without the flag' {
+                Set-TestResources @((New-TestVm -Status SUCCESS))
+                Set-TestAccount
+                { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete } | Should Throw 'syncStatus is not Missing'
+                Assert-MockCalled Invoke-VmRequest -Times 0 -Exactly -Scope It
+            }
+
+            It 'accepts non-Missing VMs once a fresh health check shows the vSphere account disconnected' {
+                Set-TestResources @((New-TestVm -Status SUCCESS), (New-TestVm b -Status SUCCESS))
+                Set-TestAccount
+                $plan = Assert-VmTarget $script:Client (New-TestTarget -Rows @((New-TestRow), (New-TestRow b))) -AllowDelete -AllowNonMissing
+                $plan.Method | Should Be delete
+                Assert-MockCalled Invoke-VmRequest -Times 1 -Exactly -Scope It -ParameterFilter {
+                    $Method -eq 'POST' -and $Path -eq '/iaas/api/cloud-accounts/account-1/health-check'
+                }
+                @($script:Calls | Where-Object { $_.Path -eq '/iaas/api/cloud-accounts/account-1' }).Count | Should Be 2
+                Assert-MockCalled Write-VmLog -Times 2 -Exactly -Scope It -ParameterFilter {
+                    $Level -eq 'WARNING' -and $Message -like '*SUCCESS, not Missing; accepted because cloud account vc-old*'
+                }
+            }
+
+            It 'refuses when the account is healthy, reports no health, or is not vSphere' {
+                foreach ($case in @(
+                    @{ Account = @{ id = 'account-1'; name = 'vc'; cloudAccountType = 'vsphere'; healthy = $true }; Error = 'is healthy' },
+                    @{ Account = @{ id = 'account-1'; name = 'vc'; cloudAccountType = 'vsphere' }; Error = 'does not report health' },
+                    @{ Account = @{ id = 'account-1'; name = 'vc'; cloudAccountType = 'vsphere'; healthy = 'false' }; Error = 'does not report health' },
+                    @{ Account = @{ id = 'account-1'; name = 'vc'; cloudAccountType = 'aws'; healthy = $false }; Error = 'not vSphere' })) {
+                    Set-TestResources @((New-TestVm -Status SUCCESS))
+                    Set-TestAccount $case.Account
+                    { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete -AllowNonMissing } | Should Throw $case.Error
+                }
+            }
+
+            It 'refuses non-Missing resources without or with a different cloud account' {
+                Set-TestResources @((New-TestVm), @{ id = 'disk'; type = 'Cloud.vSphere.Disk'; syncStatus = 'SUCCESS' })
+                Set-TestAccount
+                { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete -AllowNonMissing } | Should Throw 'records no cloud account'
+                Set-TestResources @((New-TestVm), [pscustomobject]@{ id = 'disk'; type = 'Cloud.vSphere.Disk'; syncStatus = 'SUCCESS'
+                    properties = @{ endpointId = 'account-2' } })
+                { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete -AllowNonMissing } | Should Throw 'belongs to cloud account account-2'
+                Assert-MockCalled Invoke-VmRequest -Times 0 -Exactly -Scope It
+                Set-TestResources @((New-TestVm), [pscustomobject]@{ id = 'disk'; type = 'Cloud.vSphere.Disk'; syncStatus = 'SUCCESS'
+                    properties = @{ endpointId = 'account-1' } })
+                Set-TestAccount
+                (Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete -AllowNonMissing).Method | Should Be delete
+            }
+
+            It 'waits for the health-check tracker and fails closed, once per account, if it does not finish' {
+                $script:TrackerBody = '{"id":"t1","status":"INPROGRESS"}'
+                Set-TestResources @((New-TestVm -Status SUCCESS))
+                Set-TestAccount
+                Set-TestReply '/iaas/api/request-tracker/t1' @(1..20 | ForEach-Object { @{ id = 't1'; status = 'INPROGRESS' } })
+                $checks = @{}
+                { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete -AllowNonMissing -AccountChecks $checks `
+                    -HealthCheckTimeout 10 -PollInterval 5 } | Should Throw 'did not complete within 10s'
+                Set-TestResources @((New-TestVm -Status SUCCESS))
+                { Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete -AllowNonMissing -AccountChecks $checks } |
+                    Should Throw 'did not complete'
+                Assert-MockCalled Invoke-VmRequest -Times 1 -Exactly -Scope It
+                Set-TestResources @((New-TestVm -Status SUCCESS))
+                Set-TestAccount
+                Set-TestReply '/iaas/api/request-tracker/t1' @(@{ id = 't1'; status = 'INPROGRESS' }, @{ id = 't1'; status = 'FAILED' })
+                (Assert-VmTarget $script:Client (New-TestTarget) -AllowDelete -AllowNonMissing -AccountChecks @{}).Method | Should Be delete
+            }
         }
 
         It 'recognizes only one unambiguous, allowed Unregister action' {
@@ -490,9 +577,22 @@ InModuleScope VmApps.Common {
             It 'rejects a missing removal plan instead of deleting' {
                 Mock Assert-VmTarget {}
                 Mock Submit-VmDelete { throw 'must not submit' }
-                $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget)) -Execute
+                $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget)) -AllowDelete -Execute
                 $stats.Failures | Should Be 1
                 $stats.Submitted | Should Be 0
+            }
+        }
+
+        Context 'unregister-only default' {
+            It 'never submits a deployment delete without -AllowDelete' {
+                Mock Assert-VmTarget { New-VmRemovalPlan delete }
+                Mock Submit-VmDelete { throw 'must not delete' }
+                $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget)) -Execute
+                $stats.Skipped | Should Be 1
+                $stats.Submitted | Should Be 0
+                $stats.Deleted | Should Be 0
+                Assert-MockCalled Submit-VmDelete -Times 0 -Exactly -Scope It
+                Assert-MockCalled Write-VmLog -Times 1 -Scope It -ParameterFilter { $Message -like '*SKIPPED*requires -AllowDelete*' }
             }
         }
 
@@ -500,7 +600,7 @@ InModuleScope VmApps.Common {
             It 'never submits or polls in default dry run' {
                 Mock Submit-VmDelete { throw 'must not submit' }
                 Mock Get-VmDeletionOutcome { throw 'must not poll' }
-                $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget))
+                $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget)) -AllowDelete
                 $stats.Eligible | Should Be 1
                 $stats.Submitted | Should Be 0
                 Assert-MockCalled Submit-VmDelete -Times 0 -Exactly
@@ -527,7 +627,7 @@ InModuleScope VmApps.Common {
                 }
                 Mock Wait-VmPoll { throw 'should refill immediately' }
                 $targets = @(0..12 | ForEach-Object { New-TestTarget "d$_" })
-                $stats = Invoke-VmDeletionQueue $script:Client $targets -Execute
+                $stats = Invoke-VmDeletionQueue $script:Client $targets -AllowDelete -Execute
                 $script:MaximumActive | Should Be 5
                 $stats.Successful | Should Be 13
                 Assert-MockCalled Assert-VmTarget -Times 13 -Exactly
@@ -542,7 +642,7 @@ InModuleScope VmApps.Common {
                 Mock Assert-VmTarget { New-VmRemovalPlan }
                 Mock Submit-VmDelete { param($Client, $Target) return $Target.DeploymentId }
                 Mock Get-VmDeletionOutcome { throw [VmApiException]::new('GET', 'request', 404) }
-                $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget d1), (New-TestTarget d2)) `
+                $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget d1), (New-TestTarget d2)) -AllowDelete `
                     -Execute -Parallel 1 -PollInterval 2 -RequestTimeout 5
                 $stats.TimedOut | Should Be 2
                 $stats.Failures | Should Be 2
@@ -562,7 +662,7 @@ InModuleScope VmApps.Common {
                     New-VmRemovalPlan
                 }
                 Mock Submit-VmDelete { throw [VmInventoryException]::new('connection lost') }
-                $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget d1), (New-TestTarget d2), (New-TestTarget d3)) -Execute
+                $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget d1), (New-TestTarget d2), (New-TestTarget d3)) -AllowDelete -Execute
                 $stats.Skipped | Should Be 1
                 $stats.Failures | Should Be 2
                 Assert-MockCalled Submit-VmDelete -Times 1 -Exactly
@@ -574,7 +674,7 @@ InModuleScope VmApps.Common {
                 Mock Assert-VmTarget { New-VmRemovalPlan }
                 Mock Submit-VmDelete { return 'r' }
                 Mock Get-VmDeletionOutcome { return 'failed' }
-                $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget d1), (New-TestTarget d2)) -Execute
+                $stats = Invoke-VmDeletionQueue $script:Client @((New-TestTarget d1), (New-TestTarget d2)) -AllowDelete -Execute
                 $stats.Submitted | Should Be 1
                 $stats.Failures | Should Be 2
             }
@@ -862,11 +962,11 @@ InModuleScope VmApps.Common {
                 Mock Get-VmDeletionOutcome { return 'successful' }
                 $inputCsv = Join-Path $TestDrive 'legacy-input.csv'
                 $log = Join-Path $TestDrive 'legacy-delete.log'
-                (Invoke-VmDeleteCommand $script:LegacyOptions $inputCsv $log) | Should Be 0
+                (Invoke-VmDeleteCommand $script:LegacyOptions $inputCsv $log -AllowDelete) | Should Be 0
                 Assert-MockCalled Assert-VmTarget -Times 1 -Exactly -Scope It
                 Assert-MockCalled Submit-VmDelete -Times 0 -Exactly -Scope It
                 [IO.File]::ReadAllText($log) | Should Match 'would be deleted'
-                (Invoke-VmDeleteCommand $script:LegacyOptions $inputCsv $log -Execute) | Should Be 0
+                (Invoke-VmDeleteCommand $script:LegacyOptions $inputCsv $log -Execute -AllowDelete) | Should Be 0
                 Assert-MockCalled Assert-VmTarget -Times 2 -Exactly -Scope It
                 Assert-MockCalled Submit-VmDelete -Times 1 -Exactly -Scope It
                 [IO.File]::ReadAllText($log) | Should Match 'successful=1 failures=0 skipped=0'
@@ -1031,7 +1131,7 @@ Describe 'PowerShell transport and native entry points' {
             $server.Request | Should Match '\{"actionId":"test"\}'
         } finally { $server.Dispose() }
     }
-    It 'treats HTTP errors and redirects as errors without leaking server bodies' {
+    It 'treats HTTP errors and redirects as errors without leaking unstructured server bodies' {
         foreach ($status in @(404, 302)) {
             $server = [VmApps.Tests.HttpServer]::new($status, 'sensitive-server-body')
             try {
@@ -1041,11 +1141,66 @@ Describe 'PowerShell transport and native entry points' {
                 try { Invoke-VmRequest $client GET '/test' }
                 catch { $failure = Get-VmFailure $_.Exception }
                 $failure.Status | Should Be $status
-                $failure.Message | Should Be "GET /test: HTTP $status"
+                $failure.Message | Should Be "GET /test: HTTP $status (Test): non-JSON body, 21 chars"
                 [object]::ReferenceEquals($previousCallback,
                     [Net.ServicePointManager]::ServerCertificateValidationCallback) | Should Be $true
             } finally { $server.Dispose() }
         }
+    }
+    It 'reports the HTTP status text and structured server error message' {
+        foreach ($case in @(
+            @{ Status = 403; Body = '{"message":"User is not authorized","statusCode":403,"errorCode":10010}'
+               Expected = 'GET /test: HTTP 403 (Test): User is not authorized [errorCode 10010]' },
+            @{ Status = 404; Body = '{"error":"not_found","error_description":"No deployment dep-1"}'
+               Expected = 'GET /test: HTTP 404 (Test): No deployment dep-1' },
+            @{ Status = 502; Body = '<html><head><title>502 Bad Gateway</title></head><body>secret page</body></html>'
+               Expected = 'GET /test: HTTP 502 (Test): non-JSON body, 26 chars' },
+            @{ Status = 500; Body = ''; Expected = 'GET /test: HTTP 500 (Test)' })) {
+            $server = [VmApps.Tests.HttpServer]::new($case.Status, $case.Body)
+            try {
+                $client = [pscustomobject]@{ Base = $server.Url.TrimEnd('/'); ApiVersion = ''; Token = ''; Timeout = 5 }
+                $failure = $null
+                try { Invoke-VmRequest $client GET '/test' } catch { $failure = Get-VmFailure $_.Exception }
+                $failure.Status | Should Be $case.Status
+                $failure.Message | Should Be $case.Expected
+            } finally { $server.Dispose() }
+        }
+        $server = [VmApps.Tests.HttpServer]::new(401, 'raw login failure for user')
+        try {
+            $client = [pscustomobject]@{ Base = $server.Url.TrimEnd('/'); ApiVersion = ''; Token = ''; Timeout = 5 }
+            $failure = $null
+            try { Invoke-VmRequest $client POST '/login' -Body '{}' -SensitiveResponse } catch { $failure = Get-VmFailure $_.Exception }
+            $failure.Message | Should Be 'POST /login: HTTP 401 (Test)'
+        } finally { $server.Dispose() }
+    }
+    It 'decodes JSON as UTF-8 even for content types Windows PowerShell treats as binary' {
+        foreach ($contentType in @('application/hal+json', $null, 'application/json', 'application/json; charset=utf-8')) {
+            $server = [VmApps.Tests.HttpServer]::new(200, "{`"name`":`"vm-$([char]0x00e9)`"}", $null, $contentType)
+            try {
+                $client = [pscustomobject]@{ Base = $server.Url.TrimEnd('/'); ApiVersion = ''; Token = ''; Timeout = 5 }
+                (Get-VmRecord $client '/test').name | Should Be "vm-$([char]0x00e9)"
+            } finally { $server.Dispose() }
+        }
+    }
+    It 'describes non-JSON success responses with status, content type and a redacted excerpt' {
+        $body = "<html><head><title>Login</title></head><body>Session expired`n`"access_token`":`"abc123`"</body></html>"
+        $server = [VmApps.Tests.HttpServer]::new(200, $body, $null, 'text/html')
+        try {
+            $client = [pscustomobject]@{ Base = $server.Url.TrimEnd('/'); ApiVersion = ''; Token = ''; Timeout = 5 }
+            $failure = $null
+            try { Get-VmRecord $client '/deployment/api/deployments/d/resources' } catch { $failure = Get-VmFailure $_.Exception }
+            $failure.Message | Should Match ('^/deployment/api/deployments/d/resources: invalid JSON response ' +
+                '\(HTTP 200, Content-Type text/html, \d+ chars\): \[HTML page ''Login''\] Login Session expired "access_token":\*\*\*$')
+            $failure.Message | Should Not Match 'abc123'
+        } finally { $server.Dispose() }
+        $server = [VmApps.Tests.HttpServer]::new(200, '', $null, $null)
+        try {
+            $client = [pscustomobject]@{ Base = $server.Url.TrimEnd('/'); ApiVersion = ''; Token = ''; Timeout = 5 }
+            { Get-VmRecord $client '/x' } | Should Throw '/x: expected a JSON object (HTTP 200, no Content-Type, empty body)'
+        } finally { $server.Dispose() }
+        $reply = [pscustomobject]@{ Body = 'not json token=xyz'; Status = 200; ContentType = 'text/plain'; Sensitive = $true }
+        { ConvertFrom-VmJson $reply.Body 'token exchange' $reply } |
+            Should Throw 'token exchange: invalid JSON response (HTTP 200, Content-Type text/plain, 18 chars)'
     }
     It 'refuses absolute or scheme-relative API paths before any network request' {
         { Invoke-VmRequest $null GET 'https://elsewhere/test' } | Should Throw 'relative'
@@ -1178,12 +1333,43 @@ InModuleScope VmApps.Common {
                 Mock Submit-VmDelete { return 'r' }
                 Mock Get-VmDeletionOutcome { return 'successful' }
                 $log = Join-Path $TestDrive 'deletion.log'
-                (Invoke-VmDeleteCommand @{} (Join-Path $TestDrive 'input.csv') $log) | Should Be 0
+                (Invoke-VmDeleteCommand @{} (Join-Path $TestDrive 'input.csv') $log -AllowDelete) | Should Be 0
                 Assert-MockCalled Submit-VmDelete -Times 0 -Exactly
                 ([IO.File]::ReadAllText($log)) | Should Match 'would be deleted; no delete submitted'
-                (Invoke-VmDeleteCommand @{} (Join-Path $TestDrive 'input.csv') $log -Execute) | Should Be 0
+                (Invoke-VmDeleteCommand @{} (Join-Path $TestDrive 'input.csv') $log -Execute -AllowDelete) | Should Be 0
                 Assert-MockCalled Submit-VmDelete -Times 1 -Exactly
                 ([IO.File]::ReadAllText($log)) | Should Match 'successful=1 failures=0 skipped=0'
+            }
+        }
+        Context 'non-Missing confirmation CLI' {
+            BeforeEach {
+                Mock Read-VmTargets { return [pscustomobject]@{ DeploymentId = 'dep'; Rows = @(@{ deployment_name = 'App' }) } }
+                Mock Invoke-VmDeletionQueue { return New-VmStatistics }
+            }
+            It 'aborts before authentication unless the exact phrase is typed' {
+                $log = Join-Path $TestDrive 'confirm.log'
+                foreach ($answer in @('yes', 'Yes I am absolutely sure', 'yes i am absolutely sure i want this')) {
+                    $script:Answer = $answer
+                    Mock Read-Host { return $script:Answer }
+                    (Invoke-VmDeleteCommand @{} (Join-Path $TestDrive 'input.csv') $log -DeleteNonMissingVMs) | Should Be 1
+                }
+                Mock Read-Host { throw 'non-interactive' }
+                (Invoke-VmDeleteCommand @{} (Join-Path $TestDrive 'input.csv') $log -DeleteNonMissingVMs -Execute) | Should Be 1
+                Assert-MockCalled New-VmClient -Times 0 -Exactly -Scope It
+                Assert-MockCalled Invoke-VmDeletionQueue -Times 0 -Exactly -Scope It
+                ([IO.File]::ReadAllText($log)) | Should Match 'not confirmed; aborted'
+            }
+            It 'proceeds and passes the flag on after the exact phrase' {
+                Mock Read-Host { return '  Yes I am absolutely sure I want this ' }
+                $log = Join-Path $TestDrive 'confirmed.log'
+                (Invoke-VmDeleteCommand @{} (Join-Path $TestDrive 'input.csv') $log -DeleteNonMissingVMs) | Should Be 0
+                Assert-MockCalled Invoke-VmDeletionQueue -Times 1 -Exactly -Scope It -ParameterFilter { $DeleteNonMissingVMs }
+                ([IO.File]::ReadAllText($log)) | Should Match 'NON-MISSING VMs allowed'
+            }
+            It 'does not prompt without the flag' {
+                Mock Read-Host { throw 'must not prompt' }
+                (Invoke-VmDeleteCommand @{} (Join-Path $TestDrive 'input.csv') (Join-Path $TestDrive 'plain.log')) | Should Be 0
+                Assert-MockCalled Invoke-VmDeletionQueue -Times 1 -Exactly -Scope It -ParameterFilter { -not $DeleteNonMissingVMs }
             }
         }
         Context 'invalid-input CLI' {
