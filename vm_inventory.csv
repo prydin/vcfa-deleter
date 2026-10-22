@@ -1,4 +1,1 @@
 ﻿"vm_name","deployment_name","status","vm_id","resource_id","deployment_id","cloudzone","cloudzone_id","powerStatus"
-"vm-000305","Deployment-d55408ea","SUCCESS","0eca6944-35f7-312b-be71-3bc909989ea7","0eca6944-35f7-312b-be71-3bc909989ea7","ca6d1fa5-433b-4a31-a89c-4ccf09afbdca","vc-02 / dummy-dc-02","10efe9ec-fe86-40c9-995a-0fb458fde941","ON"
-"aria-vm-000001","Deployment-9b2ff034","SUCCESS","11858f80-283d-3a5d-a930-b4d077d433f9","11858f80-283d-3a5d-a930-b4d077d433f9","c1425805-bc65-4ca2-ae5e-befc5ad94f81","vc-02 / dummy-dc-02","10efe9ec-fe86-40c9-995a-0fb458fde941","ON"
-"aria-vm-000002","Deployment-88f39bb7","SUCCESS","a7d80c8d-ef60-3ea7-be6b-8b1e1c8e1d6b","a7d80c8d-ef60-3ea7-be6b-8b1e1c8e1d6b","29527076-4404-4f62-8dbc-1743adaf5433","vc-02 / dummy-dc-02","10efe9ec-fe86-40c9-995a-0fb458fde941","ON"
