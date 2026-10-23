@@ -443,14 +443,22 @@ non-string values produce `unknown` and a warning; no alternative fields are
 guessed and no extra machine requests are made for power state. The frozen Python
 inventory format is unchanged.
 
+PowerShell inventory also appends `unregisterAvailable`, using one read-only
+resource-actions request per exported VM. It is `true` when exactly one usable
+Unregister action is offered, `false` when absent, invalid or ambiguous, and
+`unknown` with a warning when the lookup fails. This is informational only:
+unknown availability does not exclude a VM or make the inventory incomplete.
+Deletion re-reads the actions before acting and never trusts this CSV value.
+
 PowerShell CSV columns:
 
 ```csv
-vm_name,deployment_name,status,vm_id,resource_id,deployment_id,cloudzone,cloudzone_id,powerStatus
+vm_name,deployment_name,status,vm_id,resource_id,deployment_id,cloudzone,cloudzone_id,powerStatus,unregisterAvailable
 ```
 
-PowerShell deletion reads and retains `powerStatus`, but it is informational only:
-it does not authorize or prevent deletion. Older enriched CSVs without it are
+PowerShell deletion reads and retains `powerStatus` and `unregisterAvailable`,
+but they are informational only: neither authorizes nor prevents deletion.
+Older enriched CSVs without these columns are
 still accepted; absent or empty values are read as `unknown`. Both deletion
 implementations use fresh top-level `syncStatus`, not CSV power state, to check
 for Missing VMs. The PowerShell deletion script defaults to dry run and performs

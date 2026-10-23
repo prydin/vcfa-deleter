@@ -149,6 +149,10 @@ discovered machine is protected in several independent ways:
   excerpted.
 - **Power state is informational.** The `powerStatus` column is never used to
   decide eligibility.
+- **Unregister availability is informational.** The `unregisterAvailable`
+  column reports `true`, `false` or `unknown` from a read-only action lookup.
+  Failed lookups are warned about without excluding the VM. Removal always
+  checks live actions again; this CSV value cannot authorize or block removal.
 
 ## 5. Removal-phase safeguards
 

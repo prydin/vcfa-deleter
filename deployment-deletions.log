@@ -76,3 +76,27 @@
 2026-10-22 11:24:19 INFO: UNREGISTERED VM resource 4c75a85a-9b46-4bf7-b5dd-03b25e89c648 in deployment f707104d-482e-4e1c-901f-204d5c2d80ca request f87f2662-d7b9-4c3d-a867-773884dd6820
 2026-10-22 11:24:19 INFO: COMPLETED unregister of all VMs in deployment f707104d-482e-4e1c-901f-204d5c2d80ca
 2026-10-22 11:24:19 INFO: SUMMARY successful=3 failures=0 skipped=0 timed_out=0 eligible=3 submitted=3 processed=3 unregistered=3 deleted=0
+2026-10-23 10:37:45 INFO: Loaded 4 deployments; mode=DRY RUN, removal=unregister-only, slots=5
+2026-10-23 10:37:45 WARNING: TLS certificate verification is disabled by Insecure. Server identity is not verified. On Windows PowerShell 5.1, this affects all HTTPS work in this process until the command exits; use a dedicated process on a trusted network.
+2026-10-23 10:37:46 INFO: DRY RUN: deployment ff344a94-cf67-4355-a590-c1cd1fab3716 (5 VMs[4]): 1 VM(s) would be unregistered; nothing submitted
+2026-10-23 10:37:46 INFO: DRY RUN: deployment fe7e95fa-8ba1-43fd-90ce-0ea90b0fdec4 (5 VMs[2]): 1 VM(s) would be unregistered; nothing submitted
+2026-10-23 10:37:46 INFO: DRY RUN: deployment 5bfab4bf-f250-4560-9d2a-d1ab45cbb8ad (5 VMs[0]): 1 VM(s) would be unregistered; nothing submitted
+2026-10-23 10:37:46 INFO: DRY RUN: deployment 0230aa8a-dd9d-442b-bc99-126b11f1a114 (Test 3): 1 VM(s) would be unregistered; nothing submitted
+2026-10-23 10:37:46 INFO: SUMMARY successful=0 failures=0 skipped=0 timed_out=0 eligible=4 submitted=0 processed=4 unregistered=0 deleted=0
+2026-10-23 10:38:24 INFO: Loaded 4 deployments; mode=EXECUTE, removal=unregister-only, slots=5
+2026-10-23 10:38:24 WARNING: TLS certificate verification is disabled by Insecure. Server identity is not verified. On Windows PowerShell 5.1, this affects all HTTPS work in this process until the command exits; use a dedicated process on a trusted network.
+2026-10-23 10:38:25 INFO: SUBMITTED unregister (Cloud.vSphere.Machine.Unregister) of VM resource a57f1aa9-8598-474d-86b1-9b81db387098 in deployment ff344a94-cf67-4355-a590-c1cd1fab3716 request 8fcb0956-a237-45ed-ac2c-9a98e02c28df
+2026-10-23 10:38:25 INFO: SUBMITTED unregister (Cloud.vSphere.Machine.Unregister) of VM resource 86dc0cd9-8d2e-486c-b270-31694c18a9ef in deployment fe7e95fa-8ba1-43fd-90ce-0ea90b0fdec4 request 0b72b8c3-4d0d-4cf3-90ff-f31ec6536b66
+2026-10-23 10:38:26 INFO: SUBMITTED unregister (Cloud.vSphere.Machine.Unregister) of VM resource 7bf61375-dc5f-4df7-9f69-589612999792 in deployment 5bfab4bf-f250-4560-9d2a-d1ab45cbb8ad request 2cafef5b-f98e-409f-95cc-a6ec885c196a
+2026-10-23 10:38:26 INFO: SUBMITTED unregister (Cloud.vSphere.Machine.Unregister) of VM resource 7f5cd3a7-5d7c-4a15-bd75-cf2056444b33 in deployment 0230aa8a-dd9d-442b-bc99-126b11f1a114 request 74def3e3-3d04-4e87-a4fd-ad3e9201db09
+2026-10-23 10:39:01 INFO: UNREGISTERED VM resource a57f1aa9-8598-474d-86b1-9b81db387098 in deployment ff344a94-cf67-4355-a590-c1cd1fab3716 request 8fcb0956-a237-45ed-ac2c-9a98e02c28df
+2026-10-23 10:39:01 INFO: COMPLETED unregister of all VMs in deployment ff344a94-cf67-4355-a590-c1cd1fab3716
+2026-10-23 10:39:01 INFO: UNREGISTERED VM resource 86dc0cd9-8d2e-486c-b270-31694c18a9ef in deployment fe7e95fa-8ba1-43fd-90ce-0ea90b0fdec4 request 0b72b8c3-4d0d-4cf3-90ff-f31ec6536b66
+2026-10-23 10:39:01 INFO: COMPLETED unregister of all VMs in deployment fe7e95fa-8ba1-43fd-90ce-0ea90b0fdec4
+2026-10-23 10:39:01 INFO: UNREGISTERED VM resource 7bf61375-dc5f-4df7-9f69-589612999792 in deployment 5bfab4bf-f250-4560-9d2a-d1ab45cbb8ad request 2cafef5b-f98e-409f-95cc-a6ec885c196a
+2026-10-23 10:39:01 INFO: COMPLETED unregister of all VMs in deployment 5bfab4bf-f250-4560-9d2a-d1ab45cbb8ad
+2026-10-23 10:39:02 INFO: UNREGISTERED VM resource 7f5cd3a7-5d7c-4a15-bd75-cf2056444b33 in deployment 0230aa8a-dd9d-442b-bc99-126b11f1a114 request 74def3e3-3d04-4e87-a4fd-ad3e9201db09
+2026-10-23 10:39:02 INFO: COMPLETED unregister of all VMs in deployment 0230aa8a-dd9d-442b-bc99-126b11f1a114
+2026-10-23 10:39:02 INFO: SUMMARY successful=4 failures=0 skipped=0 timed_out=0 eligible=4 submitted=4 processed=4 unregistered=4 deleted=0
+2026-10-23 10:44:53 INFO: Loaded 0 deployments; mode=EXECUTE, removal=unregister-only, NON-MISSING VMs allowed, slots=5
+2026-10-23 10:44:53 INFO: SUMMARY successful=0 failures=0 skipped=0 timed_out=0 eligible=0 submitted=0 processed=0 unregistered=0 deleted=0

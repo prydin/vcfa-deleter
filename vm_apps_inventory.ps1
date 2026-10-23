@@ -5,6 +5,8 @@ Export VM Apps resources with individually verified cloud-zone membership.
 .DESCRIPTION
 Only top-level syncStatus MISSING is exported by default. Use -All for every
 synchronization status. Requires VmApps.Common.psm1 beside this script.
+The unregisterAvailable CSV column reports live action availability for information
+only; an unreadable action list is reported as unknown and does not exclude the VM.
 TLS certificates are validated by default. -Insecure disables validation; use it
 only in a trusted environment and a dedicated PowerShell process.
 Use -Debug to print the elapsed time of each API call.

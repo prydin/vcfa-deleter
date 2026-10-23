@@ -122,6 +122,46 @@ InModuleScope VmApps.Common {
             { Get-VmZoneMembership @{ zoneId = 'zone-1'; properties = @{ zoneId = 'other' } } $script:Zone } | Should Throw 'Conflicting'
         }
 
+        Context 'informational inventory Unregister availability' {
+            It 'reports usable, absent, invalid and ambiguous actions without filtering rows' {
+                Mock Get-VmResourceActions { return $script:InventoryActions }
+                foreach ($case in @(
+                    @{ Actions = @(@{ id = 'Machine.Unregister'; valid = $true }); Expected = 'true' },
+                    @{ Actions = @(@{ id = 'custom'; name = 'Unregister' }); Expected = 'true' },
+                    @{ Actions = @(); Expected = 'false' },
+                    @{ Actions = @(@{ id = 'Machine.Unregister'; valid = $false }); Expected = 'false' },
+                    @{ Actions = @(@{ id = 'A.Unregister' }, @{ id = 'B.Unregister' }); Expected = 'false' }
+                )) {
+                    Set-TestResources
+                    $script:InventoryActions = $case.Actions
+                    $result = Get-TestInventory $script:Client Production
+                    $result.Count | Should Be 1
+                    $result.Rows[0].unregisterAvailable | Should Be $case.Expected
+                }
+                Assert-MockCalled Get-VmResourceActions -Times 5 -Exactly -Scope It -ParameterFilter {
+                    $DeploymentId -eq 'dep-1' -and $ResourceId -eq 'a'
+                }
+            }
+
+            It 'retains rows and reports unknown with a warning when actions cannot be read' {
+                Mock Get-VmResourceActions { throw [VmApiException]::new('GET', '/actions', 403) }
+                $result = Get-TestInventory $script:Client Production
+                $result.Count | Should Be 1
+                $result.Unverified | Should Be 0
+                $result.IncompleteDeployments | Should Be 0
+                $result.Rows[0].unregisterAvailable | Should Be unknown
+                Assert-MockCalled Write-VmLog -Times 1 -Exactly -Scope It -ParameterFilter {
+                    $Level -eq 'WARNING' -and $Message -like '*Unregister availability*HTTP 403*'
+                }
+            }
+
+            It 'does not read actions for VMs excluded by the status filter' {
+                Set-TestResources @((New-TestVm -Status 'SUCCESS'))
+                (Get-TestInventory $script:Client Production).Count | Should Be 0
+                Assert-MockCalled Get-VmResourceActions -Times 0 -Exactly -Scope It
+            }
+        }
+
         It 'continues on capped short IaaS and Spring pages' {
             Set-TestReply '/iaas/api/zones' @(
                 @{ content = @(@{ id = 'a' }); totalElements = 2 },
@@ -300,6 +340,7 @@ InModuleScope VmApps.Common {
             $targets.Count | Should Be 1
             $targets[0].Rows[0].vm_name | Should Be $row.vm_name
             $targets[0].Rows[0].powerStatus | Should Be ON
+            $targets[0].Rows[0].unregisterAvailable | Should Be unknown
             (Import-Csv $path).powerStatus | Should Be ON
             Write-VmCsv $path @()
             @(Read-VmTargets $path).Count | Should Be 0
@@ -308,16 +349,31 @@ InModuleScope VmApps.Common {
 
         It 'accepts older CSVs without powerStatus and treats empty powerStatus as unknown' {
             $path = Join-Path $TestDrive 'old.csv'
-            $columns = @($script:VmColumns | Where-Object { $_ -cne 'powerStatus' })
+            $columns = @($script:VmColumns | Where-Object { $_ -cne 'powerStatus' -and $_ -cne 'unregisterAvailable' })
             $row = New-TestRow
             $values = foreach ($column in $columns) { Get-VmText $row $column }
             [IO.File]::WriteAllText($path, ((ConvertTo-VmCsvLine $columns) + "`n" + (ConvertTo-VmCsvLine $values)))
             $target = @(Read-VmTargets $path)[0]
             $target.Rows[0].powerStatus | Should Be unknown
+            $target.Rows[0].unregisterAvailable | Should Be unknown
             Assert-VmTarget $script:Client $target -AllowDelete
             $row.powerStatus = ''
             Write-VmCsv $path @($row)
             @(Read-VmTargets $path)[0].Rows[0].powerStatus | Should Be unknown
+        }
+
+        It 'retains informational Unregister values without changing live removal validation' {
+            $path = Join-Path $TestDrive 'availability.csv'
+            foreach ($value in @('true', 'false', 'unknown', '')) {
+                Set-TestResources
+                $row = New-TestRow
+                Add-Member -InputObject $row -NotePropertyName unregisterAvailable -NotePropertyValue $value
+                Write-VmCsv $path @($row)
+                $target = @(Read-VmTargets $path)[0]
+                $expected = if ($value) { $value } else { 'unknown' }
+                $target.Rows[0].unregisterAvailable | Should Be $expected
+                Assert-VmTarget $script:Client $target -AllowDelete
+            }
         }
 
         It 'rejects legacy, duplicate, malformed and cross-zone CSVs before actions' {

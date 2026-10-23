@@ -27,7 +27,7 @@ class VmApiException : VmInventoryException {
 
 $script:VmColumns = @(
     'vm_name', 'deployment_name', 'status', 'vm_id', 'resource_id',
-    'deployment_id', 'cloudzone', 'cloudzone_id', 'powerStatus'
+    'deployment_id', 'cloudzone', 'cloudzone_id', 'powerStatus', 'unregisterAvailable'
 )
 $script:VmLog = $null
 $script:VmJsonSerializer = $null
@@ -780,11 +780,23 @@ function Get-VmInventory {
                 }
                 $name = Get-VmRequiredText $machine name "VM $machineId"
             }
+            $unregisterAvailable = 'unknown'
+            try {
+                $actions = @(Get-VmResourceActions $Client $depId $resourceId)
+                $actionId = Get-VmUnregisterAction $actions
+                $unregisterAvailable = if ($actionId) { 'true' } else { 'false' }
+            }
+            catch [System.Management.Automation.PipelineStoppedException] { throw }
+            catch {
+                $failure = Get-VmFailure $_.Exception
+                Write-VmLog "VM resource ${resourceId}: Unregister availability could not be read: $($failure.Message); reporting unknown" WARNING
+            }
             $row = [pscustomobject][ordered]@{
                 vm_name = $name; deployment_name = $depName; status = $status
                 vm_id = $machineId; resource_id = $resourceId; deployment_id = $depId
                 cloudzone = $CloudZone; cloudzone_id = $zoneId
                 powerStatus = Get-VmPowerStatus $resource
+                unregisterAvailable = $unregisterAvailable
             }
             Write-VmCsvRow $CsvWriter $row
             $rowCount++
@@ -847,7 +859,7 @@ function Read-VmTargets {
             if (-not $columnSet.Add($column)) { throw [VmInventoryException]::new('CSV contains duplicate columns') }
         }
         foreach ($column in $script:VmColumns) {
-            if ($column -ceq 'powerStatus') { continue }
+            if ($column -ceq 'powerStatus' -or $column -ceq 'unregisterAvailable') { continue }
             if (-not $columnSet.Contains($column)) {
                 throw [VmInventoryException]::new('CSV requires enriched inventory columns; regenerate the inventory')
             }
@@ -860,7 +872,7 @@ function Read-VmTargets {
             }
             $record = [ordered]@{}
             foreach ($column in $script:VmColumns) {
-                if ($column -ceq 'powerStatus') {
+                if ($column -ceq 'powerStatus' -or $column -ceq 'unregisterAvailable') {
                     $value = 'unknown'
                     if ($columnSet.Contains($column)) {
                         $value = $values[[Array]::IndexOf($columns, $column)].Trim()
